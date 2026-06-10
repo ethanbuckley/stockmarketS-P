@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+# The original file has been superseded by screener.py
+ML model
