@@ -1,6 +1,6 @@
 # S&P 500 AI Stock Screener
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-support_this_project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/placeholder)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support_this_project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/ethanbuckley)
 
 A two-stage stock screening pipeline that combines an XGBoost gradient-boosting classifier with FinBERT financial sentiment analysis to identify long and short candidates across the S&P 500.
 
