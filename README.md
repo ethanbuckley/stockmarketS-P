@@ -10,7 +10,7 @@ Built as an independent project applying quantitative finance techniques alongsi
 
 ## Live Demo
 
-**[Launch the dashboard →](https://your-app-name.streamlit.app)** *(link to be updated after deployment)*
+**[Launch the dashboard →](https://stockmarkets-p-cngwhp4eigfgpq5xphgwng.streamlit.app)**
 
 ---
 
