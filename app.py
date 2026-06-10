@@ -228,3 +228,11 @@ with st.expander("How this works"):
         caution.
         """
     )
+
+st.divider()
+st.markdown(
+    "Built by **Ethan Buckley** — "
+    "[GitHub](https://github.com/ethanbuckley) · "
+    "[LinkedIn](https://www.linkedin.com/in/ethan-buckley-b7ab6935b/)",
+    unsafe_allow_html=False,
+)
