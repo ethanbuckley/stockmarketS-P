@@ -113,7 +113,7 @@ elif signal_filter.startswith("Short"):
 # =============================================================================
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Stocks screened", len(df))
+col1.metric("Candidates shown", len(df))
 col2.metric("Showing", len(filtered))
 col3.metric("Long signals", int(((df["Confidence"] > 55) & (df["Sentiment_Score"] > 0)).sum()))
 col4.metric("Short signals", int(((df["Confidence"] < 45) & (df["Sentiment_Score"] < 0)).sum()))
@@ -155,7 +155,7 @@ with col_left:
         color="Confidence",
         color_continuous_scale="RdYlGn",
         labels={"Confidence": "Confidence (%)"},
-        title="Top 10 Long Candidates",
+        title="Top 10 by Model Confidence",
     )
     fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
     st.plotly_chart(fig_bar, use_container_width=True)
