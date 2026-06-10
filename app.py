@@ -131,8 +131,7 @@ display_df = filtered[display_cols].sort_values("Confidence", ascending=False).r
 display_df.index += 1  # 1-based rank
 
 st.dataframe(
-    display_df.style.background_gradient(subset=["Confidence"], cmap="RdYlGn")
-               .background_gradient(subset=["Sentiment_Score"], cmap="RdYlGn"),
+    display_df,
     use_container_width=True,
     height=400,
 )
