@@ -258,11 +258,9 @@ def run_monte_carlo(
     corr  = log_ret.corr().values          # correlation matrix
     n_assets = len(mu)
 
-    # Cholesky factor so that L @ L.T == corr
-    # Clip eigenvalues to handle near-singular matrices from short histories
-    eigvals, eigvecs = np.linalg.eigh(corr)
-    eigvals = np.clip(eigvals, 1e-8, None)
-    corr_psd = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    # Cholesky factor — add a small ridge to guarantee positive-definiteness
+    # without an eigendecomposition (which can fail to converge on real data)
+    corr_psd = corr + 1e-6 * np.eye(n_assets)
     L = np.linalg.cholesky(corr_psd)
 
     # Draw iid standard normals, then correlate: (n_paths, horizon, n_assets)
