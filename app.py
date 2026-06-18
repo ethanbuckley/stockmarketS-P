@@ -5,6 +5,7 @@ Deploy to Streamlit Community Cloud; no heavy ML dependencies required.
 """
 
 import os
+import time
 
 import numpy as np
 import pandas as pd
@@ -24,17 +25,100 @@ st.set_page_config(
 )
 
 # =============================================================================
+# THEME / GLOBAL STYLING
+# =============================================================================
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    :root{
+      --bg:#0B0E16; --card:#141A24; --card2:#10151E; --border:rgba(255,255,255,.07);
+      --muted:#8B95A7; --text:#E6EAF2; --accent:#6366F1; --accent2:#818CF8;
+      --pos:#34D399; --neg:#F87171;
+    }
+    html,body,[class*="css"],.stApp{font-family:'Inter',system-ui,-apple-system,sans-serif;}
+    .stApp{background:radial-gradient(1100px 560px at 82% -8%,rgba(99,102,241,.10),transparent 60%),var(--bg);}
+    #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important;}
+    .block-container{padding-top:2.2rem;padding-bottom:3rem;max-width:1320px;}
+
+    .hero-badge{display:inline-flex;align-items:center;gap:7px;font-size:.72rem;font-weight:600;
+      letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);background:rgba(99,102,241,.12);
+      border:1px solid rgba(99,102,241,.25);padding:5px 12px;border-radius:999px;margin-bottom:14px;}
+    .hero-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--pos);box-shadow:0 0 8px var(--pos);}
+    .hero h1{font-size:2.6rem;font-weight:800;letter-spacing:-.02em;margin:0 0 6px 0;line-height:1.1;
+      background:linear-gradient(92deg,#fff 10%,#B9C0FF 60%,#818CF8 100%);-webkit-background-clip:text;
+      background-clip:text;-webkit-text-fill-color:transparent;}
+    .hero p{color:var(--muted);font-size:1.02rem;margin:0;max-width:760px;line-height:1.5;}
+
+    .disclaimer{margin:18px 0 6px 0;padding:11px 16px;font-size:.86rem;color:#E2D3AE;
+      background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.22);
+      border-left:3px solid #FBBF24;border-radius:10px;}
+
+    [data-testid="stMetric"]{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);
+      border:1px solid var(--border);border-radius:16px;padding:18px 20px;
+      box-shadow:0 1px 2px rgba(0,0,0,.35);transition:border-color .15s,transform .15s;}
+    [data-testid="stMetric"]:hover{border-color:rgba(99,102,241,.45);transform:translateY(-2px);}
+    [data-testid="stMetricLabel"] p{color:var(--muted)!important;font-size:.72rem!important;font-weight:600!important;
+      text-transform:uppercase;letter-spacing:.05em;}
+    [data-testid="stMetricValue"]{font-weight:700;font-size:1.7rem;letter-spacing:-.01em;}
+
+    [data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid var(--border);}
+    button[data-baseweb="tab"]{font-weight:600;font-size:.95rem;padding:10px 4px;}
+    [data-baseweb="tab-highlight"]{background:var(--accent)!important;height:3px;border-radius:3px;}
+
+    [data-testid="stDataFrame"]{border:1px solid var(--border);border-radius:14px;overflow:hidden;}
+    [data-testid="stExpander"]{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.015);}
+
+    .footer{color:var(--muted);font-size:.85rem;text-align:center;padding-top:6px;}
+    .footer a{color:var(--accent2);text-decoration:none;}
+    .footer a:hover{text-decoration:underline;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# Shared Plotly styling so every chart matches the dark theme.
+_GRID = "rgba(255,255,255,0.06)"
+
+
+def style_plotly(fig, height=None):
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, system-ui, sans-serif", color="#C7D0DF", size=13),
+        title_font=dict(size=15, color="#E6EAF2"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        hoverlabel=dict(bgcolor="#141A24", font_size=12, font_family="Inter"),
+    )
+    if height is not None:
+        fig.update_layout(height=height)
+    fig.update_xaxes(gridcolor=_GRID, zerolinecolor=_GRID, linecolor=_GRID)
+    fig.update_yaxes(gridcolor=_GRID, zerolinecolor=_GRID, linecolor=_GRID)
+    return fig
+
+# =============================================================================
 # DISCLAIMER + HEADER
 # =============================================================================
 
-st.title("S&P 500 AI Stock Screener")
-
-st.error(
-    "**Disclaimer:** This is a personal educational project built to demonstrate "
-    "quantitative finance techniques. It does **not** constitute financial advice. "
-    "Past model performance does not guarantee future results. Do not make investment "
-    "decisions based on this tool.",
-    icon="⚠️",
+st.markdown(
+    """
+    <div class="hero">
+      <div class="hero-badge"><span class="dot"></span> Live · S&amp;P 500 · ML + Sentiment</div>
+      <h1>S&amp;P 500 AI Stock Screener</h1>
+      <p>Cross-sectional XGBoost signals fused with FinBERT news sentiment, plus a
+      Monte-Carlo portfolio-risk lab — built to showcase quantitative finance &amp; ML.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="disclaimer">⚠️ <b>Educational project — not financial advice.</b> '
+    "Past model performance does not guarantee future results; do not make "
+    "investment decisions based on this tool.</div>",
+    unsafe_allow_html=True,
 )
 
 # =============================================================================
@@ -160,7 +244,7 @@ with tab_screener:
             title="Top 10 by Model Confidence",
         )
         fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(style_plotly(fig_bar), use_container_width=True)
 
     with col_right:
         st.subheader("Confidence vs Sentiment")
@@ -178,7 +262,7 @@ with tab_screener:
         fig_scatter.add_hline(y=45, line_dash="dash", line_color="red", opacity=0.5,
                               annotation_text="Short threshold", annotation_position="right")
         fig_scatter.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(style_plotly(fig_scatter), use_container_width=True)
 
     st.divider()
 
@@ -233,17 +317,23 @@ with tab_screener:
 def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
     """Download adjusted close prices for a tuple of tickers.
 
-    Returns an empty DataFrame on any download failure (network error, rate
-    limit, delisted/unknown ticker) so callers can degrade gracefully instead
-    of crashing the dashboard.
+    Retries a few times (Yahoo throttles shared cloud IPs) and returns an empty
+    DataFrame on persistent failure so callers can degrade gracefully instead of
+    crashing the dashboard. Tickers with too little history are dropped rather
+    than allowed to collapse the whole aligned panel.
     """
-    try:
-        raw = yf.download(
-            list(tickers), period=period, progress=False, auto_adjust=True
-        )
-    except Exception as exc:  # noqa: BLE001 - surface any yfinance/network failure
-        st.error(f"Price download failed (yfinance): {exc}")
-        return pd.DataFrame()
+    raw = None
+    for attempt in range(3):
+        try:
+            raw = yf.download(
+                list(tickers), period=period, progress=False,
+                auto_adjust=True, threads=True,
+            )
+        except Exception:  # noqa: BLE001 - transient network/yfinance failure
+            raw = None
+        if raw is not None and not raw.empty:
+            break
+        time.sleep(1.0 + attempt)
 
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -253,7 +343,11 @@ def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
     else:
         prices = raw[["Close"]].copy()
         prices.columns = list(tickers)
-    return prices.dropna(how="all")
+
+    prices = prices.dropna(how="all")
+    # Keep only tickers with enough observations, then align the panel.
+    enough = prices.columns[prices.notna().sum() >= 60]
+    return prices[enough].dropna()
 
 
 def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
@@ -448,13 +542,13 @@ with tab_mc:
     fig_fan.add_trace(go.Scatter(
         x=t_axis + t_axis[::-1],
         y=pcts[4].tolist() + pcts[0].tolist()[::-1],
-        fill="toself", fillcolor="rgba(99,102,241,0.10)",
+        fill="toself", fillcolor="rgba(99,102,241,0.16)",
         line=dict(width=0), name="5th–95th pct", showlegend=True,
     ))
     fig_fan.add_trace(go.Scatter(
         x=t_axis + t_axis[::-1],
         y=pcts[3].tolist() + pcts[1].tolist()[::-1],
-        fill="toself", fillcolor="rgba(99,102,241,0.20)",
+        fill="toself", fillcolor="rgba(99,102,241,0.28)",
         line=dict(width=0), name="25th–75th pct", showlegend=True,
     ))
 
@@ -478,7 +572,7 @@ with tab_mc:
         margin=dict(l=0, r=0, t=60, b=0),
         height=420,
     )
-    st.plotly_chart(fig_fan, use_container_width=True)
+    st.plotly_chart(style_plotly(fig_fan), use_container_width=True)
 
     # ── Final value distribution ───────────────────────────────────────────────
     fig_hist = go.Figure()
@@ -500,7 +594,7 @@ with tab_mc:
         height=340,
         showlegend=False,
     )
-    st.plotly_chart(fig_hist, use_container_width=True)
+    st.plotly_chart(style_plotly(fig_hist), use_container_width=True)
 
     # ── Individual asset stats ─────────────────────────────────────────────────
     with st.expander("Individual asset statistics (from historical data)"):
@@ -570,8 +664,8 @@ with tab_mc:
 
 st.divider()
 st.markdown(
-    "Built by **Ethan Buckley** — "
-    "[GitHub](https://github.com/ethanbuckley) · "
-    "[LinkedIn](https://www.linkedin.com/in/ethan-buckley-b7ab6935b/)",
-    unsafe_allow_html=False,
+    '<div class="footer">Built by <b>Ethan Buckley</b> &nbsp;·&nbsp; '
+    '<a href="https://github.com/ethanbuckley" target="_blank">GitHub</a> &nbsp;·&nbsp; '
+    '<a href="https://www.linkedin.com/in/ethan-buckley-b7ab6935b/" target="_blank">LinkedIn</a></div>',
+    unsafe_allow_html=True,
 )
