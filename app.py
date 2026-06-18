@@ -75,22 +75,27 @@ else:
 
 st.sidebar.header("Screener Filters")
 
-min_conf, max_conf = float(df["Confidence"].min()), float(df["Confidence"].max())
+conf_lo = float(np.floor(df["Confidence"].min() * 10) / 10)
+conf_hi = float(np.ceil(df["Confidence"].max() * 10) / 10)
+if conf_lo == conf_hi:  # single candidate / all-equal confidence -> avoid slider crash
+    conf_hi = conf_lo + 0.1
 conf_range = st.sidebar.slider(
     "Confidence (%)",
-    min_value=round(min_conf, 1),
-    max_value=round(max_conf, 1),
-    value=(round(min_conf, 1), round(max_conf, 1)),
+    min_value=conf_lo,
+    max_value=conf_hi,
+    value=(conf_lo, conf_hi),
     step=0.1,
 )
 
-min_sent = float(df["Sentiment_Score"].min())
-max_sent = float(df["Sentiment_Score"].max())
+sent_lo = float(np.floor(df["Sentiment_Score"].min() * 100) / 100)
+sent_hi = float(np.ceil(df["Sentiment_Score"].max() * 100) / 100)
+if sent_lo == sent_hi:
+    sent_hi = sent_lo + 0.01
 sent_range = st.sidebar.slider(
     "Sentiment Score",
-    min_value=round(min_sent, 2),
-    max_value=round(max_sent, 2),
-    value=(round(min_sent, 2), round(max_sent, 2)),
+    min_value=sent_lo,
+    max_value=sent_hi,
+    value=(sent_lo, sent_hi),
     step=0.01,
 )
 
@@ -126,8 +131,8 @@ tab_screener, tab_mc = st.tabs(["Screener", "Monte Carlo Risk"])
 with tab_screener:
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Candidates shown", len(df))
-    col2.metric("Showing", len(filtered))
+    col1.metric("Total candidates", len(df))
+    col2.metric("Matching filters", len(filtered))
     col3.metric("Long signals", int(((df["Confidence"] > 55) & (df["Sentiment_Score"] > 0)).sum()))
     col4.metric("Short signals", int(((df["Confidence"] < 45) & (df["Sentiment_Score"] < 0)).sum()))
 
@@ -226,60 +231,99 @@ with tab_screener:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
-    """Download adjusted close prices for a tuple of tickers."""
-    raw = yf.download(list(tickers), period=period, progress=False, auto_adjust=True)
+    """Download adjusted close prices for a tuple of tickers.
+
+    Returns an empty DataFrame on any download failure (network error, rate
+    limit, delisted/unknown ticker) so callers can degrade gracefully instead
+    of crashing the dashboard.
+    """
+    try:
+        raw = yf.download(
+            list(tickers), period=period, progress=False, auto_adjust=True
+        )
+    except Exception as exc:  # noqa: BLE001 - surface any yfinance/network failure
+        st.error(f"Price download failed (yfinance): {exc}")
+        return pd.DataFrame()
+
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
     if isinstance(raw.columns, pd.MultiIndex):
-        prices = raw["Close"]
+        prices = raw["Close"].copy()
     else:
-        prices = raw[["Close"]]
+        prices = raw[["Close"]].copy()
         prices.columns = list(tickers)
     return prices.dropna(how="all")
 
 
-def run_monte_carlo(
+def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
+    """Lower-triangular Cholesky factor of a correlation matrix.
+
+    A tiny diagonal ridge absorbs floating-point noise (the fast path that
+    handles almost all real return data). If the matrix is genuinely indefinite
+    or rank-deficient — e.g. fewer observations than assets, or two perfectly
+    co-moving tickers — fall back to a nearest-PSD projection via eigenvalue
+    clipping (``np.linalg.eigh`` is reliable on symmetric matrices).
+    """
+    n = len(corr)
+    try:
+        return np.linalg.cholesky(corr + 1e-10 * np.eye(n))
+    except np.linalg.LinAlgError:
+        vals, vecs = np.linalg.eigh(corr)
+        vals = np.clip(vals, 1e-8, None)
+        fixed = vecs @ np.diag(vals) @ vecs.T
+        d = np.sqrt(np.diag(fixed))
+        fixed = fixed / np.outer(d, d)            # renormalise to unit diagonal
+        return np.linalg.cholesky(fixed)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def simulate_growth(
     log_ret: pd.DataFrame,
     horizon: int,
     n_paths: int,
-    initial_value: float,
     seed: int = 42,
 ) -> np.ndarray:
     """
-    Simulate correlated GBM paths for an equal-weighted portfolio.
+    Simulate correlated GBM growth factors for an equal-weighted portfolio.
 
-    Uses a Cholesky decomposition of the historical correlation matrix so that
-    the co-movement structure between assets is preserved across simulated paths.
+    Returns *unit* growth factors (initial value = 1) of shape
+    ``(n_paths, horizon + 1)``. The dollar initial value is applied by the
+    caller, so changing it never re-runs the simulation. Cached on the return
+    data, horizon and path count, so unrelated widget changes (sidebar filters,
+    initial value) hit the cache instead of re-simulating.
 
-    Returns portfolio_values of shape (n_paths, horizon + 1).
+    Co-movement is preserved with a Cholesky factor of the historical
+    correlation matrix; scaling the correlated shocks by each asset's ``sigma``
+    reproduces the full covariance.
     """
     rng = np.random.default_rng(seed)
 
     mu    = log_ret.mean().values          # daily mean log-return per asset
     sigma = log_ret.std().values           # daily vol per asset
-    corr  = log_ret.corr().values          # correlation matrix
+    L     = _safe_cholesky(log_ret.corr().values)
     n_assets = len(mu)
 
-    # Cholesky factor — add a small ridge to guarantee positive-definiteness
-    # without an eigendecomposition (which can fail to converge on real data)
-    corr_psd = corr + 1e-6 * np.eye(n_assets)
-    L = np.linalg.cholesky(corr_psd)
-
-    # Draw iid standard normals, then correlate: (n_paths, horizon, n_assets)
+    # iid standard normals, then correlate: (n_paths, horizon, n_assets)
     Z = rng.standard_normal((n_paths, horizon, n_assets))
     Z_corr = Z @ L.T
 
-    # GBM daily log-returns: (μ - ½σ²)dt + σ√dt · Z
-    daily_log_ret = (mu - 0.5 * sigma ** 2) + sigma * Z_corr  # dt = 1 day
+    # mu is the *mean of log-returns*, so log-returns are distributed N(mu, sigma^2)
+    # and we simulate that directly. Subtracting an extra ½σ² here would apply the
+    # Itô correction a second time and bias the drift downward (worse for volatile
+    # names and long horizons).
+    daily_log_ret = mu + sigma * Z_corr      # dt = 1 day
 
-    # Equal-weighted portfolio log-return each day
+    # Equal-weighted (in log space) portfolio log-return each day
     w = np.ones(n_assets) / n_assets
     port_daily = daily_log_ret @ w                   # (n_paths, horizon)
     port_cum   = np.cumsum(port_daily, axis=1)       # (n_paths, horizon)
 
-    portfolio_values = initial_value * np.exp(
+    growth = np.exp(
         np.concatenate([np.zeros((n_paths, 1)), port_cum], axis=1)
-    )  # (n_paths, horizon + 1)
+    )  # (n_paths, horizon + 1), initial value = 1
 
-    return portfolio_values
+    return growth
 
 
 with tab_mc:
@@ -320,22 +364,43 @@ with tab_mc:
     with st.spinner(f"Fetching 1 year of price history for {', '.join(chosen)} …"):
         prices = fetch_prices(tuple(chosen), period="1y")
 
-    # Drop tickers that came back entirely empty
+    # Keep only tickers that returned data
     prices = prices[[t for t in chosen if t in prices.columns]].dropna()
-    valid_tickers = list(prices.columns)
 
-    if len(valid_tickers) == 0:
-        st.error("Could not fetch price data for any selected ticker.")
+    if prices.shape[1] == 0:
+        st.error("Could not fetch price data for any selected ticker (yfinance).")
         st.stop()
 
-    if len(valid_tickers) < len(chosen):
-        missing = set(chosen) - set(valid_tickers)
-        st.warning(f"No price data for: {', '.join(missing)}. Continuing with {', '.join(valid_tickers)}.")
+    not_fetched = [t for t in chosen if t not in prices.columns]
+    if not_fetched:
+        st.warning(f"No price data for: {', '.join(not_fetched)}.")
 
     log_ret = np.log(prices / prices.shift(1)).dropna()
 
+    # Drop assets with no price variation: a constant series produces NaN
+    # correlations and would otherwise break the Cholesky factorisation.
+    nonconstant = log_ret.std() > 0
+    if (~nonconstant).any():
+        flat = list(log_ret.columns[~nonconstant])
+        st.warning(f"Ignoring assets with no price variation: {', '.join(flat)}.")
+        log_ret = log_ret.loc[:, nonconstant]
+
+    valid_tickers = list(log_ret.columns)
+
+    if len(valid_tickers) == 0:
+        st.error("Could not obtain usable price data for any selected ticker.")
+        st.stop()
+
+    if log_ret.shape[0] < 30:
+        st.error(
+            f"Only {log_ret.shape[0]} overlapping days of history — too few to "
+            "estimate risk reliably. Try more established tickers or fewer names."
+        )
+        st.stop()
+
     with st.spinner(f"Running {n_paths:,} Monte Carlo paths …"):
-        port_values = run_monte_carlo(log_ret, horizon, n_paths, float(initial_value))
+        growth = simulate_growth(log_ret, horizon, n_paths)
+        port_values = float(initial_value) * growth
 
     # ── Risk metrics ──────────────────────────────────────────────────────────
     final_values  = port_values[:, -1]
@@ -347,10 +412,17 @@ with tab_mc:
     med_ret = float(np.median(final_returns) * 100)
     mean_ret = float(np.mean(final_returns) * 100)
 
+    # Dollar losses vs the starting value, floored at 0: over long horizons a
+    # positive drift can lift even the 5th-percentile outcome above the initial
+    # value, which is a gain — not a "negative loss".
+    var_loss  = max(initial_value - var_95, 0.0)
+    cvar_loss = max(initial_value - cvar_95, 0.0)
+
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("VaR (95%)",  f"${initial_value - var_95:,.0f}",
-              help="Maximum loss in 95% of scenarios — you lose less than this amount 95% of the time")
-    m2.metric("CVaR (95%)", f"${initial_value - cvar_95:,.0f}",
+    m1.metric("VaR (95%)",  f"${var_loss:,.0f}",
+              help="Loss not exceeded in 95% of scenarios — you lose less than "
+                   "this (vs. the starting value) 95% of the time")
+    m2.metric("CVaR (95%)", f"${cvar_loss:,.0f}",
               help="Average loss in the worst 5% of scenarios (Expected Shortfall)")
     m3.metric("P(loss)",    f"{p_loss*100:.1f}%",
               help="Fraction of simulated paths that end below the initial investment")
@@ -358,6 +430,13 @@ with tab_mc:
     m5.metric("Mean return",   f"{mean_ret:+.1f}%")
 
     st.divider()
+
+    st.info(
+        f"Starting from \\${initial_value:,.0f}, in the worst 5% of simulated "
+        f"{horizon}-day outcomes this portfolio ends near \\${var_95:,.0f} "
+        f"(about a \\${var_loss:,.0f} loss). The median outcome is {med_ret:+.1f}%, "
+        f"and {p_loss * 100:.0f}% of paths finish below the starting value."
+    )
 
     # ── Fan chart ─────────────────────────────────────────────────────────────
     t_axis = list(range(horizon + 1))
@@ -444,10 +523,14 @@ with tab_mc:
 
             Each asset's daily log-return is modelled as:
 
-            > ln(S_{t+1}/S_t) = (μ − ½σ²) + σ · Z_t
+            > ln(S_{t+1}/S_t) = μ + σ · Z_t
 
-            where μ and σ are estimated from 1 year of historical daily log-returns,
-            and Z_t is a standard normal random variable.
+            where μ and σ are the mean and standard deviation of 1 year of
+            historical daily log-returns, and Z_t is a standard normal random
+            variable. Because μ is estimated directly as the mean *log*-return,
+            log-returns are simulated as N(μ, σ²); the Itô "−½σ²" term is not
+            subtracted again (doing so would double-count it and bias the drift
+            downward, increasingly so for volatile names and long horizons).
 
             **Correlated paths via Cholesky decomposition**
 
