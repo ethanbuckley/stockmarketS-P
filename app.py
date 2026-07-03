@@ -4,6 +4,7 @@ Reads data/latest_signals.csv produced by generate_signals.py.
 Deploy to Streamlit Community Cloud; no heavy ML dependencies required.
 """
 
+import json
 import os
 import time
 
@@ -214,7 +215,9 @@ elif signal_filter.startswith("Short"):
 # TABS
 # =============================================================================
 
-tab_screener, tab_mc = st.tabs(["Screener", "Monte Carlo Risk"])
+tab_screener, tab_mc, tab_validation = st.tabs(
+    ["Screener", "Monte Carlo Risk", "Model Validation"]
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,7 +239,7 @@ with tab_screener:
     display_df = filtered[display_cols].sort_values("Confidence", ascending=False).reset_index(drop=True)
     display_df.index += 1
 
-    st.dataframe(display_df, use_container_width=True, height=400)
+    st.dataframe(display_df, width="stretch", height=400)
     st.caption(
         "A blank sentiment score means no news was available for that ticker "
         "at generation time; it does not mean neutral sentiment."
@@ -257,7 +260,7 @@ with tab_screener:
             title="Top 10 by Model Confidence",
         )
         fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(style_plotly(fig_bar), use_container_width=True)
+        st.plotly_chart(style_plotly(fig_bar), width="stretch")
 
     with col_right:
         st.subheader("Confidence vs Sentiment")
@@ -275,7 +278,7 @@ with tab_screener:
         fig_scatter.add_hline(y=45, line_dash="dash", line_color="red", opacity=0.5,
                               annotation_text="Short threshold", annotation_position="right")
         fig_scatter.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(style_plotly(fig_scatter), use_container_width=True)
+        st.plotly_chart(style_plotly(fig_scatter), width="stretch")
 
     st.divider()
 
@@ -585,7 +588,7 @@ with tab_mc:
         margin=dict(l=0, r=0, t=60, b=0),
         height=420,
     )
-    st.plotly_chart(style_plotly(fig_fan), use_container_width=True)
+    st.plotly_chart(style_plotly(fig_fan), width="stretch")
 
     # ── Final value distribution ───────────────────────────────────────────────
     fig_hist = go.Figure()
@@ -607,7 +610,7 @@ with tab_mc:
         height=340,
         showlegend=False,
     )
-    st.plotly_chart(style_plotly(fig_hist), use_container_width=True)
+    st.plotly_chart(style_plotly(fig_hist), width="stretch")
 
     # ── Individual asset stats ─────────────────────────────────────────────────
     with st.expander("Individual asset statistics (from historical data)"):
@@ -617,11 +620,11 @@ with tab_mc:
             "Ann. Vol (%)":    (log_ret.std() * np.sqrt(252) * 100).round(2).values,
             "Sharpe (rf=0)":   ((log_ret.mean() * 252) / (log_ret.std() * np.sqrt(252))).round(3).values,
         })
-        st.dataframe(asset_stats, use_container_width=True, hide_index=True)
+        st.dataframe(asset_stats, width="stretch", hide_index=True)
 
         corr_df = log_ret.corr().round(3)
         st.markdown("**Return correlation matrix (1-year daily)**")
-        st.dataframe(corr_df, use_container_width=True)
+        st.dataframe(corr_df, width="stretch")
 
     with st.expander("Methodology"):
         st.markdown(
@@ -670,6 +673,208 @@ with tab_mc:
             risk illustration, not a precise forecast.
             """
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3 — MODEL VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VALIDATION_DIR = os.path.join(os.path.dirname(__file__), "data")
+VALIDATION_METRICS_PATH = os.path.join(_VALIDATION_DIR, "validation_metrics.json")
+VALIDATION_DAILY_PATH = os.path.join(_VALIDATION_DIR, "validation_daily.csv")
+VALIDATION_CALIB_PATH = os.path.join(_VALIDATION_DIR, "validation_calibration.csv")
+
+
+@st.cache_data(ttl=3600)
+def load_validation_artefacts():
+    with open(VALIDATION_METRICS_PATH) as f:
+        metrics = json.load(f)
+    daily = pd.read_csv(VALIDATION_DAILY_PATH, parse_dates=["date"])
+    calib = pd.read_csv(VALIDATION_CALIB_PATH)
+    return metrics, daily, calib
+
+
+with tab_validation:
+    st.subheader("Walk-Forward Validation")
+
+    _artefacts_present = all(
+        os.path.exists(p)
+        for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIB_PATH)
+    )
+    if not _artefacts_present:
+        st.info(
+            "No validation artefacts found. Run `python evaluate.py` locally to "
+            "generate `data/validation_metrics.json` and the daily/calibration "
+            "CSVs, then commit them."
+        )
+    else:
+        metrics, val_daily, val_calib = load_validation_artefacts()
+        pooled = metrics["results"]["pooled"]
+        overall = metrics["results"]["overall_daily"]
+        snapshot = metrics["data_snapshot"]
+        scheme = metrics["validation_scheme"]
+
+        st.markdown(
+            "Out-of-sample performance of the XGBoost classifier, measured the "
+            "way the screener is actually used: each test day, rank the whole "
+            "S&P 500 cross-section and take the top 15. Expanding-window "
+            "walk-forward folds with calendar-year test blocks; training rows "
+            "whose 5-day label windows would overlap a test period are purged."
+        )
+
+        v1, v2, v3, v4, v5 = st.columns(5)
+        v1.metric(
+            "ROC AUC (pooled)", f"{pooled['roc_auc']:.3f}",
+            help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance.",
+        )
+        v2.metric(
+            "Brier score", f"{pooled['brier']:.3f}",
+            help="Mean squared error of the predicted probabilities; lower is better.",
+        )
+        v3.metric(
+            "Precision@15 (daily mean)",
+            f"{overall['precision_top15_mean'] * 100:.1f}%",
+            delta=f"{overall['excess_precision_top15_mean'] * 100:+.1f} pts vs base rate",
+            help="Fraction of each day's top-15 picks whose take-profit barrier "
+                 "was hit first, averaged over test days.",
+        )
+        v4.metric(
+            "Daily base rate", f"{overall['base_rate_daily_mean'] * 100:.1f}%",
+            help="Average fraction of all stocks that hit the take-profit barrier first on a given test day.",
+        )
+        v5.metric(
+            "Top-decile lift", f"{overall['top_decile_lift_mean']:.2f}x",
+            help="Hit rate of the top decile by predicted probability relative to the day's base rate.",
+        )
+        st.caption(
+            f"Data snapshot: {snapshot['last_price_date']} "
+            f"({snapshot['n_tickers']} tickers) · "
+            f"generated {metrics['generated_at_utc']} · "
+            f"top-15 beats the base rate on "
+            f"{overall['frac_days_top15_beats_base'] * 100:.0f}% of "
+            f"{overall['n_days']} test days · "
+            f"95% CI on the mean excess: "
+            f"[{overall['excess_precision_top15_ci95'][0] * 100:+.1f}, "
+            f"{overall['excess_precision_top15_ci95'][1] * 100:+.1f}] pts"
+        )
+
+        # The caveats ship inside the same artefact as the numbers, so they
+        # are always rendered alongside them.
+        st.warning(
+            "**Read before quoting these numbers**\n\n"
+            + "\n".join(f"- {c}" for c in metrics["caveats"])
+        )
+
+        st.divider()
+
+        folds_df = pd.DataFrame(scheme["folds"])[["fold_id", "test_start", "partial"]]
+        perf_df = pd.DataFrame(metrics["results"]["per_fold"])
+        fold_table = folds_df.merge(perf_df, on="fold_id")
+        fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(
+            fold_table["partial"], " (partial)", ""
+        )
+
+        year_label = dict(zip(fold_table["fold_id"], fold_table["Test year"], strict=True))
+
+        st.subheader("Per-Fold Results")
+        display = pd.DataFrame({
+            "Test year": fold_table["Test year"],
+            "Test rows": fold_table["n_test_rows"],
+            "ROC AUC": fold_table["roc_auc"].round(3),
+            "Brier": fold_table["brier"].round(3),
+            "Base rate": (fold_table["base_rate"] * 100).round(1),
+            "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
+            "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
+            "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
+        })
+        st.dataframe(display, width="stretch", hide_index=True)
+
+        col_box, col_rel = st.columns(2)
+
+        with col_box:
+            box_df = val_daily.copy()
+            box_df["Test year"] = box_df["fold_id"].map(year_label)
+            box_df = box_df.melt(
+                id_vars=["Test year"],
+                value_vars=["precision_top15", "base_rate"],
+                var_name="Metric",
+                value_name="Value",
+            )
+            box_df["Metric"] = box_df["Metric"].map(
+                {"precision_top15": "Precision@15", "base_rate": "Base rate"}
+            )
+            fig_box = px.box(
+                box_df, x="Test year", y="Value", color="Metric",
+                title="Daily precision@15 vs base rate, by test year",
+                color_discrete_sequence=["#6366F1", "#8B95A7"],
+            )
+            fig_box.update_layout(
+                yaxis_title="Daily hit rate",
+                legend=dict(orientation="h", y=1.12),
+                margin=dict(l=0, r=0, t=60, b=0),
+            )
+            st.plotly_chart(style_plotly(fig_box, height=400), width="stretch")
+
+        with col_rel:
+            pooled_calib = val_calib[val_calib["fold_id"].astype(str) == "pooled"]
+            fig_rel = go.Figure()
+            lo = float(pooled_calib["mean_predicted"].min())
+            hi = float(pooled_calib["mean_predicted"].max())
+            fig_rel.add_trace(go.Scatter(
+                x=[lo, hi], y=[lo, hi], mode="lines", name="Perfect calibration",
+                line=dict(color="gray", dash="dash"),
+            ))
+            fig_rel.add_trace(go.Scatter(
+                x=pooled_calib["mean_predicted"], y=pooled_calib["observed_rate"],
+                mode="lines+markers", name="Model (pooled)",
+                line=dict(color="#6366F1", width=2.5), marker_size=8,
+                customdata=pooled_calib["count"],
+                hovertemplate="Predicted %{x:.3f}<br>Observed %{y:.3f}<br>n=%{customdata}<extra></extra>",
+            ))
+            fig_rel.update_layout(
+                title="Reliability curve (quantile bins, pooled test rows)",
+                xaxis_title="Mean predicted probability",
+                yaxis_title="Observed positive rate",
+                legend=dict(orientation="h", y=1.12),
+                margin=dict(l=0, r=0, t=60, b=0),
+            )
+            st.plotly_chart(style_plotly(fig_rel, height=400), width="stretch")
+
+        with st.expander("How this validation works"):
+            st.markdown(
+                f"""
+                **Protocol.** Expanding-window walk-forward validation with
+                calendar-year test blocks, starting in
+                {scheme['first_test_year']}. For each fold, the model is
+                retrained from scratch on all data up to the fold's training
+                cutoff using the production training code and hyperparameters,
+                then scores every day in the test year.
+
+                **Leakage control.** The triple-barrier label for day *t* looks
+                at the next {scheme['purge_trading_days']} trading days, so the
+                last {scheme['purge_trading_days']} trading days before each
+                test block are removed from training: their labels would peek
+                into the test period. All features are strictly backward-looking
+                (rolling windows, exponential averages, lags), which is enforced
+                by an automated causality check that rebuilds features from
+                truncated data and asserts they are unchanged.
+
+                **Metrics.** Precision@15 mirrors deployment: rank the day's
+                cross-section by predicted probability, take the top 15, and
+                measure how many hit the take-profit barrier first. The base
+                rate is the same quantity for the whole cross-section, so the
+                excess is the value added by the ranking. ROC AUC and the
+                Brier score are computed over all test rows; the reliability
+                curve shows whether predicted probabilities match observed
+                frequencies. Confidence intervals use a moving-block bootstrap
+                (block length {scheme['purge_trading_days']}) because
+                overlapping label windows make consecutive days dependent.
+
+                The full implementation is in `evaluate.py`; every number on
+                this page is read from `data/validation_metrics.json`, which
+                records the data snapshot, fold boundaries, library versions
+                and git commit that produced it.
+                """
+            )
 
 # =============================================================================
 # FOOTER
