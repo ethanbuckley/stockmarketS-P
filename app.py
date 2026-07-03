@@ -1,5 +1,5 @@
 """
-app.py — S&P 500 AI Screener Dashboard
+app.py: S&P 500 AI Screener dashboard
 Reads data/latest_signals.csv produced by generate_signals.py.
 Deploy to Streamlit Community Cloud; no heavy ML dependencies required.
 """
@@ -107,16 +107,17 @@ def style_plotly(fig, height=None):
 st.markdown(
     """
     <div class="hero">
-      <div class="hero-badge"><span class="dot"></span> Live · S&amp;P 500 · ML + Sentiment</div>
+      <div class="hero-badge"><span class="dot"></span> S&amp;P 500 · XGBoost + FinBERT · Updated weekly</div>
       <h1>S&amp;P 500 AI Stock Screener</h1>
-      <p>Cross-sectional XGBoost signals fused with FinBERT news sentiment, plus a
-      Monte-Carlo portfolio-risk lab — built to showcase quantitative finance &amp; ML.</p>
+      <p>XGBoost signals across the S&amp;P 500, combined with FinBERT news sentiment,
+      with a Monte Carlo simulator for portfolio risk and walk-forward validation
+      of the classifier.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="disclaimer">⚠️ <b>Educational project — not financial advice.</b> '
+    '<div class="disclaimer">⚠️ <b>Educational project, not financial advice.</b> '
     "Past model performance does not guarantee future results; do not make "
     "investment decisions based on this tool.</div>",
     unsafe_allow_html=True,
@@ -221,7 +222,7 @@ tab_screener, tab_mc, tab_validation = st.tabs(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — SCREENER (existing content, unchanged)
+# TAB 1: SCREENER
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab_screener:
@@ -288,7 +289,7 @@ with tab_screener:
             This screener combines two complementary signals to identify long and short
             candidates across the S&P 500.
 
-            **Stage 1 — XGBoost Classifier (quantitative signal)**
+            **Stage 1: XGBoost classifier (quantitative signal)**
 
             An XGBoost gradient-boosting model is trained on 10+ years of daily price data
             across all S&P 500 constituents (~1.3 million observations). The target label uses
@@ -303,7 +304,7 @@ with tab_screener:
             relative performance vs benchmarks. One model is trained across all tickers so
             it learns cross-sectional patterns rather than fitting to any single stock's history.
 
-            **Stage 2 — FinBERT Sentiment Analysis (qualitative signal)**
+            **Stage 2: FinBERT sentiment analysis (qualitative signal)**
 
             The top 15 and bottom 5 candidates by XGBoost confidence are passed to
             [FinBERT](https://huggingface.co/ProsusAI/finbert), a BERT model fine-tuned on
@@ -318,7 +319,7 @@ with tab_screener:
             | Long candidate | Confidence > 55% **and** Sentiment > 0 |
             | Short candidate | Confidence < 45% **and** Sentiment < 0 |
 
-            High confidence alone is not a buy signal — both the quantitative and qualitative
+            High confidence alone is not a buy signal: both the quantitative and qualitative
             signals should align. Mixed signals (high confidence, negative sentiment) warrant
             caution.
             """
@@ -326,7 +327,7 @@ with tab_screener:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — MONTE CARLO RISK
+# TAB 2: MONTE CARLO RISK
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -371,8 +372,8 @@ def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
 
     A tiny diagonal ridge absorbs floating-point noise (the fast path that
     handles almost all real return data). If the matrix is genuinely indefinite
-    or rank-deficient — e.g. fewer observations than assets, or two perfectly
-    co-moving tickers — fall back to a nearest-PSD projection via eigenvalue
+    or rank-deficient (fewer observations than assets, or two perfectly
+    co-moving tickers), fall back to a nearest-PSD projection via eigenvalue
     clipping (``np.linalg.eigh`` is reliable on symmetric matrices).
     """
     n = len(corr)
@@ -439,10 +440,10 @@ def simulate_growth(
 with tab_mc:
     st.subheader("Monte Carlo Portfolio Risk Simulation")
     st.markdown(
-        "Simulates thousands of possible future portfolio paths using **Geometric Brownian Motion** "
-        "calibrated to the historical return distribution of the screener's top candidates. "
-        "Correlated asset paths are generated via Cholesky decomposition of the empirical "
-        "correlation matrix."
+        "Simulates thousands of possible future portfolio paths using geometric "
+        "Brownian motion calibrated to the historical return distribution of the "
+        "screener's top candidates. Correlated asset paths are generated via "
+        "Cholesky decomposition of the empirical correlation matrix."
     )
 
     # ── Controls ──────────────────────────────────────────────────────────────
@@ -503,7 +504,7 @@ with tab_mc:
 
     if log_ret.shape[0] < 30:
         st.error(
-            f"Only {log_ret.shape[0]} overlapping days of history — too few to "
+            f"Only {log_ret.shape[0]} overlapping days of history, too few to "
             "estimate risk reliably. Try more established tickers or fewer names."
         )
         st.stop()
@@ -524,13 +525,13 @@ with tab_mc:
 
     # Dollar losses vs the starting value, floored at 0: over long horizons a
     # positive drift can lift even the 5th-percentile outcome above the initial
-    # value, which is a gain — not a "negative loss".
+    # value, which is a gain, not a "negative loss".
     var_loss  = max(initial_value - var_95, 0.0)
     cvar_loss = max(initial_value - cvar_95, 0.0)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("VaR (95%)",  f"${var_loss:,.0f}",
-              help="Loss not exceeded in 95% of scenarios — you lose less than "
+              help="Loss not exceeded in 95% of scenarios: you lose less than "
                    "this (vs. the starting value) 95% of the time")
     m2.metric("CVaR (95%)", f"${cvar_loss:,.0f}",
               help="Average loss in the worst 5% of scenarios (Expected Shortfall)")
@@ -580,7 +581,7 @@ with tab_mc:
                       annotation_text="Initial value", annotation_position="right")
 
     fig_fan.update_layout(
-        title=f"Simulated portfolio paths — {horizon}-day horizon  "
+        title=f"Simulated portfolio paths, {horizon}-day horizon  "
               f"({n_paths:,} paths, equal-weighted: {', '.join(valid_tickers)})",
         xaxis_title="Trading days",
         yaxis_title="Portfolio value ($)",
@@ -659,15 +660,15 @@ with tab_mc:
 
             **Risk metrics**
 
-            - **VaR (95%)** — the loss threshold exceeded in only 5% of simulated paths
-            - **CVaR (95%)** — the average loss across the worst 5% of paths (also called
+            - **VaR (95%)**: the loss threshold exceeded in only 5% of simulated paths
+            - **CVaR (95%)**: the average loss across the worst 5% of paths (also called
               Expected Shortfall); a more conservative and coherent risk measure than VaR
-            - **P(loss)** — fraction of paths ending below the initial investment
+            - **P(loss)**: fraction of paths ending below the initial investment
 
             **Limitations**
 
             GBM assumes constant μ and σ, normally distributed returns, and no
-            jumps — all of which are violated by real equity returns. The model does
+            jumps, all of which are violated by real equity returns. The model does
             not account for changing correlations in stress periods (correlations tend
             to spike during market crashes). Results should be treated as a stylised
             risk illustration, not a precise forecast.
@@ -675,7 +676,7 @@ with tab_mc:
         )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 — MODEL VALIDATION
+# TAB 3: MODEL VALIDATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VALIDATION_DIR = os.path.join(os.path.dirname(__file__), "data")
