@@ -6,32 +6,43 @@ A two-stage stock screening pipeline that combines:
   2. FinBERT NLP sentiment analysis on live news headlines (qualitative signal)
 
 The model predicts whether a stock will hit a +4% take-profit before a -4% stop-loss
-within a 5-day forward window — a "triple-barrier labelling" approach from financial ML.
+within a 5-day forward window, a "triple-barrier labelling" approach from financial ML.
+
+Usage:
+    python screener.py [--tickers-limit N] [--skip-sentiment]
 
 Author: Ethan Buckley
 """
 
+from __future__ import annotations
+
+import argparse
+import datetime
+import logging
 import os
 import sys
-import logging
 import warnings
+from io import StringIO
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from io import StringIO
-from xgboost import XGBClassifier
-from transformers import pipeline
 
-# Suppress noisy third-party logs so only our own print statements appear
+if TYPE_CHECKING:
+    from xgboost import XGBClassifier
+
+# Suppress noisy third-party logs so only our own output appears
 warnings.filterwarnings("ignore")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
-# CONFIGURATION — all magic numbers in one place for easy adjustment
+# CONFIGURATION: all magic numbers in one place for easy adjustment
 # =============================================================================
 
 DATA_START_DATE = "2015-01-01"
@@ -70,7 +81,11 @@ def fetch_sp500_tickers() -> list[str]:
     Scrapes the current S&P 500 constituent list from Wikipedia.
 
     Returns a list of ticker symbols with dots replaced by hyphens
-    (e.g. BRK.B → BRK-B) to match the Yahoo Finance format.
+    (e.g. BRK.B -> BRK-B) to match the Yahoo Finance format.
+
+    Raises RuntimeError if the page cannot be fetched or the constituents
+    table cannot be parsed: a silently wrong universe would corrupt
+    everything downstream, so this fails loudly.
     """
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {
@@ -81,19 +96,43 @@ def fetch_sp500_tickers() -> list[str]:
             "Chrome/116.0 Safari/537.36"
         )
     }
-    response = requests.get(url, headers=headers)
-    table = pd.read_html(StringIO(response.text))[0]
-    tickers = table["Symbol"].str.replace(".", "-", regex=False).tolist()
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    tables = pd.read_html(StringIO(response.text))
+    if not tables or "Symbol" not in tables[0].columns:
+        raise RuntimeError(
+            "Could not parse the S&P 500 constituents table from Wikipedia "
+            "(the page layout may have changed)."
+        )
+    tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
+    if len(tickers) < 400:
+        raise RuntimeError(
+            f"Parsed only {len(tickers)} tickers from Wikipedia; expected roughly 500. "
+            "Refusing to continue with a partial universe."
+        )
     return tickers
 
 
-def download_market_data(tickers: list[str]) -> pd.DataFrame:
+def download_market_data(tickers: list[str], start: str = DATA_START_DATE) -> pd.DataFrame:
     """
     Downloads OHLCV data for all tickers from Yahoo Finance.
     Forward-fills missing values to handle non-trading days and data gaps.
+
+    auto_adjust is passed explicitly because yfinance changed its default
+    between versions; adjusted prices are required so that splits and
+    dividends do not appear as spurious barrier crossings.
     """
     all_tickers = tickers + MACRO_TICKERS
-    data = yf.download(all_tickers, start=DATA_START_DATE, progress=False, threads=True)
+    data = yf.download(all_tickers, start=start, progress=False, threads=True, auto_adjust=True)
+    if data is None or data.empty:
+        raise RuntimeError("yfinance returned no market data.")
+
+    missing = [t for t in tickers if t not in data["Close"].columns or data["Close"][t].isna().all()]
+    if missing:
+        shown = ", ".join(missing[:10]) + (", ..." if len(missing) > 10 else "")
+        logger.warning("No price data for %d ticker(s): %s", len(missing), shown)
+
     data = data.ffill()
     return data
 
@@ -107,15 +146,15 @@ def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     Applies triple-barrier labelling to create the target variable.
 
     For each day i, we look at the next FORWARD_WINDOW_DAYS bars:
-    - If the high crosses TAKE_PROFIT_PCT above the close → label 1 (bullish)
-    - If the low crosses STOP_LOSS_PCT below the close  → label 0 (bearish)
-    - If neither barrier is hit within the window       → label 0 (bearish by default)
+    - If the high crosses TAKE_PROFIT_PCT above the close -> label 1 (bullish)
+    - If the low crosses STOP_LOSS_PCT below the close  -> label 0 (bearish)
+    - If neither barrier is hit within the window       -> label 0 (bearish by default)
 
     This is preferable to simple N-day forward returns because it more closely
     models how a real trade with risk management would play out.
 
-    Implementation uses sliding_window_view for a fully vectorized O(n·W) NumPy
-    pass instead of nested Python loops, making it ~100–200× faster on long series.
+    Implementation uses sliding_window_view for a fully vectorized O(n*W) NumPy
+    pass instead of nested Python loops, making it ~100-200x faster on long series.
     """
     from numpy.lib.stride_tricks import sliding_window_view
 
@@ -125,12 +164,17 @@ def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     lows   = df["Low"].to_numpy(dtype=float)
     n = len(closes)
 
+    if n <= W:
+        # Too short for any forward window; sliding_window_view would raise.
+        df["Target"] = np.nan
+        return df
+
     # sliding_window_view(arr, W)[k] == arr[k : k+W].
     # We want the window starting one bar *after* entry i, so we use index i+1:
     #   forward_highs[i] = highs[i+1 : i+1+W]
     # sliding_window_view gives (n-W+1) windows; slicing [1:] drops window 0
-    # (which starts at bar 0) so row i of the result covers bars i+1…i+W.
-    # Valid for i in 0 … n-W-1, matching the original loop range.
+    # (which starts at bar 0) so row i of the result covers bars i+1...i+W.
+    # Valid for i in 0 ... n-W-1, matching the original loop range.
     forward_highs = sliding_window_view(highs, W)[1:]   # shape (n-W, W)
     forward_lows  = sliding_window_view(lows,  W)[1:]   # shape (n-W, W)
 
@@ -184,7 +228,7 @@ def build_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Position"] = (df["Close"] - bb_lower) / (bb_upper - bb_lower)
 
     # --- Volume: VWAP deviation (5-day rolling) ---
-    # How far the current price is from its volume-weighted average — a proxy for fair value
+    # How far the current price is from its volume-weighted average, a proxy for fair value
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
     vwap_5d = (typical_price * df["Volume"]).rolling(5).sum() / df["Volume"].rolling(5).sum()
     df["Price_to_VWAP"] = df["Close"] / vwap_5d
@@ -256,11 +300,67 @@ def process_ticker(ticker: str, raw_data: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_master_dataframe(
+    start: str = DATA_START_DATE,
+    tickers_limit: int | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Fetches data and builds the labelled master feature panel for the whole universe.
+
+    Returns (master_df, metadata):
+      - master_df: one row per (date, ticker) on the union yfinance calendar
+        (tz-naive DatetimeIndex), with OHLCV, Ticker, all FEATURE_COLUMNS and
+        Target. No dropna and no date filtering is applied here; callers
+        (training, prediction, walk-forward evaluation) do their own filtering.
+      - metadata: download timestamp, ticker list, and last price date, so
+        downstream artefacts can record exactly which data snapshot they used.
+    """
+    print("Fetching live S&P 500 ticker list from Wikipedia...")
+    tickers = fetch_sp500_tickers()
+    if tickers_limit is not None:
+        tickers = tickers[:tickers_limit]
+
+    print(f"Downloading market data for {len(tickers)} stocks since {start}...")
+    raw_data = download_market_data(tickers, start=start)
+
+    # Tickers that returned no data at all cannot be processed
+    available = [t for t in tickers if t in raw_data["Close"].columns]
+
+    print("Engineering features for all tickers...")
+    master_df = pd.concat([process_ticker(t, raw_data) for t in available])
+
+    metadata = {
+        "download_timestamp_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "tickers": available,
+        "last_price_date": str(master_df.index.max().date()),
+    }
+    return master_df, metadata
+
+
+def build_dataset(tickers_limit: int | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Builds the two frames the screener needs:
+      - train_df: all rows with complete features and a valid label
+      - latest_df: the most recent complete-feature row per ticker (today's signal)
+    """
+    master_df, _ = build_master_dataframe(tickers_limit=tickers_limit)
+
+    train_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"]).copy()
+    latest_df = (
+        master_df
+        .dropna(subset=FEATURE_COLUMNS)
+        .groupby("Ticker")
+        .tail(1)
+        .copy()
+    )
+    return train_df, latest_df
+
+
 # =============================================================================
 # STEP 3: MODEL TRAINING
 # =============================================================================
 
-# The feature set fed to XGBoost — each feature is listed explicitly for clarity
+# The feature set fed to XGBoost; each feature is listed explicitly for clarity
 FEATURE_COLUMNS = [
     "Return", "RSI", "MACD", "BB_Position",
     "Price_to_VWAP", "ATR_Ratio", "Volume_Surge", "Day_Of_Week",
@@ -278,11 +378,29 @@ def train_model(train_df: pd.DataFrame) -> XGBClassifier:
     Using one "universal" model (rather than one per stock) means the model
     learns patterns that generalise across the market, not just overfit to
     one ticker's history. The output probability (predict_proba) is used
-    as the ranking score — not a hard buy/sell decision.
+    as the ranking score, not a hard buy/sell decision.
     """
+    # Imported lazily so that importing this module (tests, evaluation,
+    # generate_signals) does not require xgboost to be installed.
+    from xgboost import XGBClassifier
+
     model = XGBClassifier(**XGB_PARAMS)
     model.fit(train_df[FEATURE_COLUMNS], train_df["Target"])
     return model
+
+
+def score_and_rank(model, latest_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Scores the latest row per ticker and returns the focus list for sentiment
+    analysis: the TOP_N_CANDIDATES highest and BOTTOM_N_CANDIDATES lowest by
+    predicted probability. Adds a "Probability" column; no sentiment yet.
+    """
+    latest_df = latest_df.copy()
+    latest_df["Probability"] = model.predict_proba(latest_df[FEATURE_COLUMNS])[:, 1]
+
+    top_candidates = latest_df.nlargest(TOP_N_CANDIDATES, "Probability")
+    bottom_candidates = latest_df.nsmallest(BOTTOM_N_CANDIDATES, "Probability")
+    return pd.concat([top_candidates, bottom_candidates]).copy()
 
 
 # =============================================================================
@@ -294,26 +412,33 @@ def load_sentiment_model():
     Loads the FinBERT model, a BERT variant fine-tuned on financial text.
     Returns a HuggingFace sentiment-analysis pipeline.
     """
+    # Imported lazily: transformers (and its torch dependency) are only
+    # needed when sentiment is actually requested.
+    from transformers import pipeline
+
     return pipeline("sentiment-analysis", model="ProsusAI/finbert")
 
 
-def get_news_sentiment(ticker: str, sentiment_model) -> float:
+def get_news_sentiment(ticker: str, sentiment_model) -> float | None:
     """
     Fetches recent news headlines for a ticker and scores them with FinBERT.
 
-    Returns a float in roughly [-1, +1]:
+    Returns a float in roughly [-1, +1], or None when no verdict is possible:
       - Positive = bullish news sentiment
       - Negative = bearish news sentiment
-      - 0.0 = no news found or neutral
+      - 0.0 = genuinely neutral coverage
+      - None = no news found, or the fetch/scoring failed
 
-    Each headline is scored individually; the final score is the mean.
+    None is deliberately distinct from 0.0: "we could not read the news" is
+    not the same signal as "the news is neutral". Each headline is scored
+    individually; the final score is the mean of the signed scores, where
+    FinBERT's positive/negative/neutral labels map to +score/-score/0.
     """
     try:
-        stock = yf.Ticker(ticker)
-        news_items = stock.news
+        news_items = yf.Ticker(ticker).news
 
         if not news_items:
-            return 0.0
+            return None
 
         headlines = []
         for article in news_items[:NEWS_ARTICLES_PER_TICKER]:
@@ -324,123 +449,136 @@ def get_news_sentiment(ticker: str, sentiment_model) -> float:
                 headlines.append(article["title"])
 
         if not headlines:
-            return 0.0
+            return None
 
         results = sentiment_model(headlines)
 
-        # Convert FinBERT labels to signed scores: positive → +score, negative → -score
-        signed_scores = [
-            r["score"] if r["label"] == "positive" else -r["score"]
-            for r in results
-        ]
+        signed_scores = []
+        for r in results:
+            if r["label"] == "positive":
+                signed_scores.append(r["score"])
+            elif r["label"] == "negative":
+                signed_scores.append(-r["score"])
+            else:  # neutral headlines carry no directional signal
+                signed_scores.append(0.0)
         return sum(signed_scores) / len(signed_scores)
 
     except Exception:
-        return 0.0
+        logger.warning("News sentiment lookup failed for %s", ticker)
+        return None
 
 
 # =============================================================================
-# STEP 5: OUTPUT FORMATTING
+# STEP 5: PIPELINE ORCHESTRATION
+# =============================================================================
+
+def run_pipeline(tickers_limit: int | None = None, skip_sentiment: bool = False) -> pd.DataFrame:
+    """
+    Runs the full two-stage pipeline and returns the leaderboard DataFrame
+    with columns [Ticker, Close, Confidence, Sentiment_Score], sorted by
+    Confidence descending. Missing sentiment is NaN (rendered as a blank
+    field in the CSV), never silently coerced to 0.
+    """
+    train_df, latest_df = build_dataset(tickers_limit=tickers_limit)
+
+    print("Training XGBoost model...")
+    model = train_model(train_df)
+
+    focus_list = score_and_rank(model, latest_df)
+
+    if skip_sentiment:
+        focus_list["Sentiment_Score"] = np.nan
+    else:
+        print("\nLoading FinBERT sentiment model (may take a moment on first run)...")
+        sentiment_model = load_sentiment_model()
+
+        print(f"\nScanning news sentiment for {len(focus_list)} candidates...")
+        sentiments = []
+        for i, ticker in enumerate(focus_list["Ticker"], start=1):
+            sys.stdout.write(f"\r  [{i}/{len(focus_list)}] Analysing: {ticker:<6}")
+            sys.stdout.flush()
+            sentiments.append(get_news_sentiment(ticker, sentiment_model))
+        print()
+        focus_list["Sentiment_Score"] = [s if s is not None else np.nan for s in sentiments]
+
+    focus_list["Confidence"] = (focus_list["Probability"] * 100).round(2)
+
+    leaderboard = (
+        focus_list[["Ticker", "Close", "Confidence", "Sentiment_Score"]]
+        .sort_values("Confidence", ascending=False)
+        .reset_index(drop=True)
+    )
+    return leaderboard
+
+
+# =============================================================================
+# STEP 6: OUTPUT FORMATTING
 # =============================================================================
 
 def print_results(leaderboard: pd.DataFrame) -> None:
     """Prints the final screener results to the console in a readable format."""
     separator = "=" * 65
     row_divider = "-" * 65
-    header = f"{'Rank':<6} | {'Ticker':<6} | {'Price':<10} | {'AI Sentiment':<15} | {'Confidence'}"
+    header = f"{'Rank':<6} | {'Ticker':<6} | {'Price':<10} | {'Sentiment':<15} | {'Confidence'}"
+
+    def fmt_sentiment(value: float) -> str:
+        # NaN means no news was available, not neutral sentiment
+        return "n/a" if pd.isna(value) else f"{value:.2f}"
 
     print(f"\n\n{separator}")
-    print("   🚀  ELITE S&P 500 AI SCREENER  (Live Predictions)  🚀")
+    print("   S&P 500 AI Screener: latest predictions")
     print(separator)
 
-    print("\n🟢  TOP 5 BREAKOUT CANDIDATES  (Strongest Long Signals)  🟢")
+    print("\nTop 5 long candidates (highest model confidence)")
     print(row_divider)
     print(header)
     print(row_divider)
     for rank, row in enumerate(leaderboard.head(5).itertuples(), start=1):
         print(
             f"#{rank:<5} | {row.Ticker:<6} | ${row.Close:<9.2f} | "
-            f"{row.Sentiment_Score:<15.2f} | {row.Confidence:.2f}%"
+            f"{fmt_sentiment(row.Sentiment_Score):<15} | {row.Confidence:.2f}%"
         )
 
-    print("\n🔴  BOTTOM 5 BREAKDOWN CANDIDATES  (Strongest Short Signals)  🔴")
+    print("\nBottom 5 short candidates (lowest model confidence)")
     print(row_divider)
     print(header)
     print(row_divider)
-    for rank, row in enumerate(leaderboard.tail(5).itertuples(), start=16):
+    bottom_start = max(len(leaderboard) - 4, 1)
+    for rank, row in enumerate(leaderboard.tail(5).itertuples(), start=bottom_start):
         print(
             f"#{rank:<5} | {row.Ticker:<6} | ${row.Close:<9.2f} | "
-            f"{row.Sentiment_Score:<15.2f} | {row.Confidence:.2f}%"
+            f"{fmt_sentiment(row.Sentiment_Score):<15} | {row.Confidence:.2f}%"
         )
 
     print(f"\n{separator}")
     print("Interpretation guide:")
-    print("  LONG:  Confidence > 55%  AND  Sentiment > 0  →  bullish confluence")
-    print("  SHORT: Confidence < 45%  AND  Sentiment < 0  →  bearish confluence")
+    print("  LONG:  Confidence > 55%  AND  Sentiment > 0  ->  bullish confluence")
+    print("  SHORT: Confidence < 45%  AND  Sentiment < 0  ->  bearish confluence")
     print(separator)
 
 
 # =============================================================================
-# MAIN PIPELINE
+# MAIN
 # =============================================================================
 
-def main():
-    # --- 1. Fetch data ---
-    print("Fetching live S&P 500 ticker list from Wikipedia...")
-    sp500_tickers = fetch_sp500_tickers()
-
-    print(f"Downloading market data for {len(sp500_tickers)} stocks since {DATA_START_DATE}...")
-    raw_data = download_market_data(sp500_tickers)
-
-    # --- 2. Build feature panel ---
-    print("Engineering features for all tickers...")
-    all_ticker_dfs = [process_ticker(t, raw_data) for t in sp500_tickers]
-    master_df = pd.concat(all_ticker_dfs)
-
-    # Training set: all rows with complete features and a valid label
-    train_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"]).copy()
-
-    # Prediction set: only the most recent row per ticker (today's signal)
-    latest_df = (
-        master_df
-        .dropna(subset=FEATURE_COLUMNS)
-        .groupby("Ticker")
-        .tail(1)
-        .copy()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="S&P 500 stock screener: XGBoost signals plus FinBERT news sentiment."
     )
-
-    # --- 3. Train model ---
-    print("Training XGBoost model...")
-    model = train_model(train_df)
-
-    # --- 4. Score all stocks and select candidates for sentiment analysis ---
-    latest_df["Probability"] = model.predict_proba(latest_df[FEATURE_COLUMNS])[:, 1]
-
-    top_candidates = latest_df.nlargest(TOP_N_CANDIDATES, "Probability")
-    bottom_candidates = latest_df.nsmallest(BOTTOM_N_CANDIDATES, "Probability")
-    focus_list = pd.concat([top_candidates, bottom_candidates]).copy()
-
-    # --- 5. Run FinBERT sentiment on the shortlisted candidates ---
-    print("\nLoading FinBERT sentiment model (may take a moment on first run)...")
-    sentiment_model = load_sentiment_model()
-
-    print(f"\nScanning news sentiment for {len(focus_list)} candidates...")
-    sentiments = []
-    for i, ticker in enumerate(focus_list["Ticker"], start=1):
-        sys.stdout.write(f"\r  [{i}/{len(focus_list)}] Analysing: {ticker:<6}")
-        sys.stdout.flush()
-        sentiments.append(get_news_sentiment(ticker, sentiment_model))
-
-    focus_list["Sentiment_Score"] = sentiments
-    focus_list["Confidence"] = (focus_list["Probability"] * 100).round(2)
-
-    # --- 6. Build and display final leaderboard ---
-    leaderboard = (
-        focus_list[["Ticker", "Close", "Sentiment_Score", "Confidence"]]
-        .sort_values("Confidence", ascending=False)
-        .reset_index(drop=True)
+    parser.add_argument(
+        "--tickers-limit", type=int, default=None, metavar="N",
+        help="only process the first N tickers (fast smoke run; not for real signals)",
     )
+    parser.add_argument(
+        "--skip-sentiment", action="store_true",
+        help="skip the FinBERT sentiment stage; Sentiment_Score is left blank",
+    )
+    return parser.parse_args(argv)
 
+
+def main() -> None:
+    args = parse_args()
+    leaderboard = run_pipeline(tickers_limit=args.tickers_limit, skip_sentiment=args.skip_sentiment)
     print_results(leaderboard)
 
 
