@@ -1,0 +1,6 @@
+# Test and lint dependencies (CI installs these plus requirements.txt).
+# No torch/transformers: screener.py imports them lazily, and the tests
+# stub the sentiment model.
+pytest>=8.0
+ruff>=0.5
+xgboost>=2.0

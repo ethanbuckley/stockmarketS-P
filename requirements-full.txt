@@ -1,0 +1,9 @@
+# Full pipeline: data download, XGBoost training, FinBERT sentiment,
+# walk-forward validation. The app itself needs only requirements.txt.
+-r requirements.txt
+requests>=2.31
+lxml>=5.0            # pd.read_html parser for the Wikipedia constituents table
+xgboost>=2.0
+transformers>=4.40
+torch>=2.2
+scikit-learn>=1.4    # evaluate.py: ROC AUC
