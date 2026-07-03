@@ -171,8 +171,14 @@ conf_range = st.sidebar.slider(
     step=0.1,
 )
 
-sent_lo = float(np.floor(df["Sentiment_Score"].min() * 100) / 100)
-sent_hi = float(np.ceil(df["Sentiment_Score"].max() * 100) / 100)
+# A blank Sentiment_Score means no news was available at generation time;
+# NaN rows are kept visible and must not break the slider bounds.
+sent_values = df["Sentiment_Score"].dropna()
+if sent_values.empty:
+    sent_lo, sent_hi = -1.0, 1.0
+else:
+    sent_lo = float(np.floor(sent_values.min() * 100) / 100)
+    sent_hi = float(np.ceil(sent_values.max() * 100) / 100)
 if sent_lo == sent_hi:
     sent_hi = sent_lo + 0.01
 sent_range = st.sidebar.slider(
@@ -188,12 +194,15 @@ signal_filter = st.sidebar.radio(
     options=["All", "Long candidates (Conf > 55%, Sent > 0)", "Short candidates (Conf < 45%, Sent < 0)"],
 )
 
-# Apply filters
+# Apply filters. Rows with missing sentiment pass the sentiment filter so
+# that "no news available" does not silently hide a candidate.
 filtered = df[
     (df["Confidence"] >= conf_range[0]) &
     (df["Confidence"] <= conf_range[1]) &
-    (df["Sentiment_Score"] >= sent_range[0]) &
-    (df["Sentiment_Score"] <= sent_range[1])
+    (
+        df["Sentiment_Score"].isna() |
+        ((df["Sentiment_Score"] >= sent_range[0]) & (df["Sentiment_Score"] <= sent_range[1]))
+    )
 ].copy()
 
 if signal_filter.startswith("Long"):
@@ -228,6 +237,10 @@ with tab_screener:
     display_df.index += 1
 
     st.dataframe(display_df, use_container_width=True, height=400)
+    st.caption(
+        "A blank sentiment score means no news was available for that ticker "
+        "at generation time; it does not mean neutral sentiment."
+    )
 
     st.divider()
 
