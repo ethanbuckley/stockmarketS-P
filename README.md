@@ -1,9 +1,9 @@
-# S&P 500 AI Stock Screener
+# S&P 500 stock screener
 
 [![CI](https://github.com/ethanbuckley/stockmarketS-P/actions/workflows/ci.yml/badge.svg)](https://github.com/ethanbuckley/stockmarketS-P/actions/workflows/ci.yml)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-support_this_project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/ethanbuckley)
 
-A two-stage stock screening pipeline that combines an XGBoost gradient-boosting classifier with FinBERT financial sentiment analysis to identify long and short candidates across the S&P 500, with walk-forward validation of the classifier and a Monte Carlo portfolio-risk simulator in the dashboard.
+A two-stage pipeline that ranks long and short candidates across the S&P 500: an XGBoost classifier does the ranking, and FinBERT scores news sentiment on the shortlist. The classifier is walk-forward validated, and the dashboard includes a Monte Carlo portfolio-risk simulator.
 
 Built as an independent project applying quantitative finance techniques alongside my Physics and Physical Chemistry degree at UCL.
 
@@ -21,7 +21,7 @@ Built as an independent project applying quantitative finance techniques alongsi
 flowchart LR
     A["S&P 500 tickers\n(Wikipedia)"] --> B["Market data\n(yfinance)"]
     B --> C["Feature engineering\nRSI · MACD · ATR · VWAP\nBollinger Bands · Volume · Macro"]
-    C --> D["XGBoost classifier\n~1.4M observations\nTriple-barrier labels"]
+    C --> D["XGBoost classifier\n~1.3M observations\nTriple-barrier labels"]
     D --> E["Top 15 + Bottom 5\ncandidates"]
     E --> F["FinBERT sentiment\n(live headlines)"]
     D & F --> G["latest_signals.csv"]
@@ -40,9 +40,9 @@ flowchart LR
 
 ### Stage 1: XGBoost classifier
 
-An XGBoost binary classifier is trained on 10+ years of daily OHLCV data across all S&P 500 constituents (roughly 1.4 million labelled observations, 2015 to present). The target variable uses **triple-barrier labelling**: for each trading day, the label asks whether the stock hits a +4% take-profit before a −4% stop-loss within the next 5 trading days. This is preferable to simple forward returns because it reflects how a real trade with risk management plays out. Days where neither barrier is hit, or where both are hit on the same bar, are conservatively labelled 0.
+An XGBoost binary classifier is trained on 10+ years of daily OHLCV data across all S&P 500 constituents (roughly 1.3 million daily observations, 2015 to present). The target variable uses **triple-barrier labelling**: for each trading day, the label asks whether the stock hits a +4% take-profit before a −4% stop-loss within the next 5 trading days. This is preferable to simple forward returns because it reflects how a real trade with risk management plays out. Days where neither barrier is hit, or where both are hit on the same bar, are conservatively labelled 0.
 
-Features fall into five groups:
+Features fall into five groups (22 columns in total):
 
 | Group                | Features                                  |
 | -------------------- | ----------------------------------------- |
@@ -92,7 +92,7 @@ Precision@top-15 mirrors deployment: each test day, rank the whole cross-section
 | 2025           | 0.648   | 49.7%        | 27.9%     |
 | 2026 (partial) | 0.602   | 49.5%        | 33.6%     |
 
-The ranking adds value in every regime tested (the 2020 crash, the 2022 bear market, and the recoveries either side), but these are classifier-quality metrics with an important caveat: the universe is **today's** S&P 500 constituents applied retroactively, so the measured hit rates are optimistic (see Limitations). The dashboard's Model Validation tab renders these artefacts, including per-day dispersion and the calibration curve.
+The ranking beats the base rate in every regime tested (the 2020 crash, the 2022 bear market, and the recoveries either side), but these are classifier-quality metrics with an important caveat: the universe is **today's** S&P 500 constituents applied retroactively, so the measured hit rates are optimistic (see Limitations). The dashboard's Model Validation tab renders these artefacts, including per-day dispersion and the calibration curve.
 
 Interpretation thresholds used by the screener:
 
@@ -105,7 +105,7 @@ Interpretation thresholds used by the screener:
 
 ## Limitations
 
-Read these before quoting any number above; they also ship inside `data/validation_metrics.json` so the dashboard cannot display the metrics without them.
+Read these before quoting any number above; the validation caveats among them also ship inside `data/validation_metrics.json`, so the dashboard cannot display the metrics without them.
 
 - **Survivorship bias.** The universe is the current S&P 500 membership scraped from Wikipedia and applied back to 2015. Companies that were removed from the index along the way are missing, which inflates measured hit rates. Historical constituent lists are not freely available, so this is documented rather than corrected.
 - **No transaction costs or portfolio backtest.** The validation measures per-prediction classifier quality, not tradeable returns. No costs, slippage, sizing or capacity effects are modelled.

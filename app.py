@@ -108,7 +108,7 @@ st.markdown(
     """
     <div class="hero">
       <div class="hero-badge"><span class="dot"></span> S&amp;P 500 · XGBoost + FinBERT · Updated weekly</div>
-      <h1>S&amp;P 500 AI Stock Screener</h1>
+      <h1>S&amp;P 500 stock screener</h1>
       <p>XGBoost signals across the S&amp;P 500, combined with FinBERT news sentiment,
       with a Monte Carlo simulator for portfolio risk and walk-forward validation
       of the classifier.</p>

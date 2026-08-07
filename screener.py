@@ -1,5 +1,5 @@
 """
-S&P 500 AI Stock Screener
+S&P 500 stock screener
 =========================
 A two-stage stock screening pipeline that combines:
   1. XGBoost binary classifier trained on technical indicators (quantitative signal)
