@@ -1,7 +1,6 @@
 # S&P 500 stock screener
 
 [![CI](https://github.com/ethanbuckley/stockmarketS-P/actions/workflows/ci.yml/badge.svg)](https://github.com/ethanbuckley/stockmarketS-P/actions/workflows/ci.yml)
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-support_this_project-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/ethanbuckley)
 
 A two-stage pipeline that ranks long and short candidates across the S&P 500: an XGBoost classifier does the ranking, and FinBERT scores news sentiment on the shortlist. The classifier is walk-forward validated, and the dashboard includes a Monte Carlo portfolio-risk simulator.
 
@@ -216,6 +215,6 @@ This project is for educational and research purposes only. It does not constitu
 ## Author
 
 Ethan Buckley, MSci Natural Sciences (Physics and Physical Chemistry), UCL
-[ethan.buckley.24@ucl.ac.uk](mailto:ethan.buckley.24@ucl.ac.uk)
+[ethan@ethanbuckley.me.uk](mailto:ethan@ethanbuckley.me.uk)
 
 Released under the [MIT licence](LICENSE).

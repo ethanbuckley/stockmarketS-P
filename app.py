@@ -885,6 +885,6 @@ st.divider()
 st.markdown(
     '<div class="footer">Built by <b>Ethan Buckley</b> &nbsp;·&nbsp; '
     '<a href="https://github.com/ethanbuckley" target="_blank">GitHub</a> &nbsp;·&nbsp; '
-    '<a href="https://www.linkedin.com/in/ethan-buckley-b7ab6935b/" target="_blank">LinkedIn</a></div>',
+    '<a href="https://www.linkedin.com/in/ethan-buckley/" target="_blank">LinkedIn</a></div>',
     unsafe_allow_html=True,
 )
