@@ -241,6 +241,43 @@ The A/B is the point: re-running `pit_analysis.py` under both sources measures w
 We deliberately do **not** use the official `wrds` PyPI package. It pins `pandas<2.3`, which downgrades this repo to pandas 2.2.3 and makes `master_cache.pkl` unreadable (`StringDtype.__init__() takes from 1 to 2 positional arguments`). The package is a thin wrapper over psycopg2 plus `read_sql`, so `wrds_source.py` calls those directly and the repo stays on pandas 3.
 
 
+## Deflated Sharpe: does any of this survive the search that found it?
+
+Every t-statistic above treats its configuration as if it were the only one tried. It was not. `deflated.py` searches a 108-point grid (2 targets x 3 ridge penalties x 3 smoothing windows x 3 weighting schemes x 2 universes) and applies the Deflated Sharpe Ratio of Bailey & López de Prado (2014), which corrects a Sharpe for selection across N trials **and** for the skew and fat tails that inflate a naive Sharpe t-test. Our daily P&L has kurtosis of 11–15, so the second correction is not cosmetic.
+
+Grid Sharpes run 0.21 to 1.52, sd 0.44. With N = 108 the Sharpe expected from the **best of pure noise** is **1.12 annualised**.
+
+| strategy | SR ann | SR0 ann | skew | kurt | DSR | verdict |
+| ------------------------------ | ------ | ------- | ----- | ---- | ----- | ------- |
+| best of grid (all, overnight, 5d) | 1.52 | 1.12 | −0.64 | 11.5 | 0.836 | fails |
+| **overnight, PIT, decile** | **1.00** | 1.12 | −0.46 | 13.9 | **0.387** | **fails** |
+| overnight, all names, decile | 1.35 | 1.12 | −0.87 | 12.5 | 0.716 | fails |
+| close-to-close, PIT, 20d smoothed | 0.24 | 1.12 | 0.50 | 15.1 | 0.013 | fails |
+
+**The survivorship-corrected overnight strategy scores 1.00, below the 1.12 you would expect from the best of 108 noise trials.** Nothing here clears DSR ≥ 0.95.
+
+The grid points are not independent — nested models on one dataset — so the effective trial count is lower than 108. But the real search was *wider* than the grid: XGBoost, the reversal baseline, the flip, ownership and liquidity terciles, the small-cap universe. The verdict depends on a number nobody can observe, so the whole curve is reported:
+
+| strategy | SR ann | N=2 | N=5 | N=10 | N=20 | N=50 | N=108 |
+| --------------------------- | ---- | ----- | ----- | ----- | ----- | ----- | ----- |
+| best of grid | 1.52 | 0.999 | 0.992 | 0.978 | 0.953 | 0.899 | 0.836 |
+| overnight, all names, decile | 1.35 | 0.997 | 0.978 | 0.947 | 0.897 | 0.807 | 0.716 |
+| **overnight, PIT, decile** | 1.00 | 0.973 | 0.884 | 0.783 | 0.666 | 0.508 | 0.387 |
+| close-to-close, PIT, smoothed | 0.24 | 0.515 | 0.238 | 0.128 | 0.067 | 0.028 | 0.013 |
+
+The best uncorrected configuration survives only if you believe fewer than about 20 independent things were tried. The survivorship-corrected one needs fewer than 5, which is not credible.
+
+### What still stands
+
+Selection bias makes results look **better**, so findings that are negative or pre-specified are not undermined by it:
+
+- **The LPS replication.** Panel A is a hypothesis specified by a published paper, not a maximised quantity: sorting on past overnight returns forecasts next month's intraday return at −1.02%/mo, t = −4.57. One pre-specified test.
+- **The survivorship measurement.** 64% coverage of true membership, ~25% inflation of measured performance. A measurement, not a selected result.
+- **Every negative tradeability result.** Small-cap overnight alpha sitting inside the Corwin–Schultz spread (17.0 against 7.46 bps/side), the overnight book's 2.0 gross/day floor, the flip being worse than the leg alone. Selection bias would have hidden these, not created them.
+
+What does **not** stand is the claim that any configuration here is a tradeable edge.
+
+
 ## Limitations
 
 These inherit the root README's limitations and add two.
@@ -278,6 +315,7 @@ These inherit the root README's limitations and add two.
 | `diagnose_wide.py` | spread vs break-even on the small-cap result |
 | `wrds_source.py` | Compustat prices and index membership via WRDS |
 | `source.py` | which price/membership files the analysis reads |
+| `deflated.py` | deflated Sharpe across the grid actually searched |
 
 Reproduce with:
 
