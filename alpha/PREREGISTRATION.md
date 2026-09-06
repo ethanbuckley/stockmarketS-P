@@ -63,10 +63,24 @@ Deflated Sharpe of the frozen configuration on the survivorship-free universe.
 
 These run **before** any test. They are pre-specified, so fixing a gate failure and re-running is not p-hacking; changing a gate after seeing a test result is.
 
-1. Decomposition identity `(1+overnight)(1+intraday) − 1 = close-to-close` holds to < 1e-9.
-2. Point-in-time membership coverage ≥ 90% of index members in every year 2015–2026.
-3. Median ≥ 300 names per day in the test window.
-4. The universe contains at least 150 tickers absent from the current yfinance panel, i.e. the delisted names are actually present. **If this fails the whole exercise is pointless** and no test is reported.
+Gates 1 and 3 apply to both arms. Gates 2 and 4 are checks that the *new* data is genuinely survivorship-free, so they apply to the **confirmatory arm only** — see Amendment 1.
+
+1. *(both arms)* Decomposition identity `(1+overnight)(1+intraday) − 1 = close-to-close` holds to < 1e-9.
+2. *(confirmatory only)* Point-in-time membership coverage ≥ 90% of index members in every year 2015–2026.
+3. *(both arms)* Median ≥ 300 names per day in the test window.
+4. *(confirmatory only)* The universe contains at least 150 tickers absent from the current yfinance panel, i.e. the delisted names are actually present. **If this fails the whole exercise is pointless** and no test is reported.
+
+## Amendment log
+
+Amendments are recorded here rather than applied silently. An amendment made after a test statistic has been observed voids the test.
+
+### Amendment 1 — 2026-09-06, before any test statistic was computed
+
+**Change.** Gates 2 and 4 apply to the confirmatory arm only, not to both arms.
+
+**Reason.** A specification error, found on the first run of the baseline arm. The baseline arm *is* the survivorship-biased data — that is its entire purpose as the paired comparison point — so a gate requiring ≥ 90% coverage of point-in-time membership can never pass on it. Its observed coverage is 0.711 in its worst year, which is not a defect to be fixed but the very quantity the confirmatory arm exists to correct. Gate 4 has the same structure and was already written as confirmatory-only in the code.
+
+**Why this is not result-driven.** The gate fired *before* any test ran, so no value of Test A, B or C had been observed when the error was found. Nothing about the strategy, the metric or the thresholds changed. The frozen configuration table is untouched.
 
 ## What we will not do
 
@@ -82,3 +96,22 @@ If the frozen configuration fails, **that is the result**. Any further analysis 
 ## Void conditions
 
 The test does not run, and no result is reported, if: neither CRSP nor Compustat is entitled; any data-quality gate fails and cannot be fixed without altering a frozen value; or this file is modified after data retrieval.
+
+## Baseline arm (survivors-only), recorded before the WRDS data exists
+
+Run with `ALPHA_SOURCE=yfinance python3 alpha/preregistered.py baseline`. Stored in `alpha/results/prereg_baseline.json`, including the daily P&L series, so Test B is a paired comparison on identical dates.
+
+| quantity | value |
+| --------------------- | ---------------------- |
+| days / tickers | 1,677 / 577 |
+| names per day | 441 |
+| IC | 0.0214 (t = 4.01) |
+| gross | 3.141 bps/day |
+| gross Sharpe | 1.13 |
+| **break-even** | **1.57 bps/side** |
+| Test A | −0.79%/mo, t = −3.41, **PASS** |
+| Test C | DSR@N=108 = 0.511, **FAIL** |
+
+Both predictions recorded above held: Test A passes with a magnitude smaller than the survivor-biased −1.02%/mo, and Test C fails.
+
+Note the ticker count is 577, not the 499 quoted elsewhere in the README. The small-cap download recovered former index members that were *removed from the index but are still listed*; those are not delisted and Yahoo still serves them. The genuinely missing population is narrower than 276, and Test B will measure what that narrower population is worth.

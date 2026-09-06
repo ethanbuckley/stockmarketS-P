@@ -316,6 +316,8 @@ These inherit the root README's limitations and add two.
 | `wrds_source.py` | Compustat prices and index membership via WRDS |
 | `source.py` | which price/membership files the analysis reads |
 | `deflated.py` | deflated Sharpe across the grid actually searched |
+| `PREREGISTRATION.md` | the frozen WRDS test, committed before the data |
+| `preregistered.py` | executes it; no strategy options |
 
 Reproduce with:
 
