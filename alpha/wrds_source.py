@@ -19,9 +19,21 @@ CREDENTIALS. This module never handles your password. It connects with
 psycopg2, which reads ~/.pgpass itself; you create that file once, yourself.
 Nothing here reads, stores, prompts for or logs a credential.
 
-    printf 'wrds-pgdata.wharton.upenn.edu:9737:wrds:YOURUSER:YOURPASS\n' >> ~/.pgpass
-    chmod 600 ~/.pgpass          # postgres silently ignores it otherwise
     export WRDS_USERNAME=YOURUSER
+    read -s "?WRDS password: " P
+    P=${P//\\/\\\\}; P=${P//:/\\:}   # see the escaping note below
+    printf 'wrds-pgdata.wharton.upenn.edu:9737:wrds:%s:%s\n' "$WRDS_USERNAME" "$P" >> ~/.pgpass
+    chmod 600 ~/.pgpass          # postgres silently ignores it otherwise
+    unset P
+
+Two failure modes that produce identical, unhelpful errors:
+  * A ~/.pgpass that is not chmod 600 is ignored WITHOUT WARNING, giving
+    "fe_sendauth: no password supplied", the same message as having no file.
+  * ':' and '\' are field separators in ~/.pgpass. An unescaped ':' in a
+    password silently truncates it at the colon and the server reports
+    "FATAL: PAM authentication failed", with nothing pointing at the file.
+    Hence the two substitutions above; a letters-and-digits password avoids
+    the issue entirely.
 
 We deliberately do NOT use the official `wrds` package: it pins pandas<2.3,
 which downgrades this repo's pandas 3.x and makes master_cache.pkl unreadable.
@@ -76,8 +88,11 @@ def connect():
         raise RuntimeError(
             "set WRDS_USERNAME (and put the password in ~/.pgpass, chmod 600). "
             "See this module's docstring.")
+    # 30s was too short to even surface the real failure: it reported
+    # "timeout expired" where the server actually accepts TLS in 0.2s, sends
+    # an auth request, then holds and drops. 120s lets the true error through.
     return psycopg2.connect(host=WRDS_HOST, port=WRDS_PORT, dbname=WRDS_DB,
-                            user=user, sslmode="require", connect_timeout=30)
+                            user=user, sslmode="require", connect_timeout=120)
 
 
 def raw_sql(conn, query: str) -> pd.DataFrame:
