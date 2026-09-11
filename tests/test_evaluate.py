@@ -163,6 +163,10 @@ def test_run_evaluation_end_to_end_mini():
     assert (backtest["strategy_net"] <= backtest["strategy_gross"]).all()
     bt = results["backtest"]
     assert set(bt["series"]) == {"strategy_net", "strategy_gross", "universe_ew", "spy"}
+    atr = results["baselines"]["atr_rank"]
+    assert 0.0 <= atr["daily_auc_mean"] <= 1.0 and "strategy_net" in atr["backtest"]
+    # The synthetic signal lives in feature 0, not ATR_Ratio, so the model must beat the baseline
+    assert results["overall_daily"]["daily_auc_mean"] > atr["daily_auc_mean"]
     assert bt["series"]["strategy_net"]["n_days"] == len(backtest)
     assert sum(y["n_days"] for y in bt["by_year"]) == len(backtest)
     assert (calib["fold_id"] == "pooled").any()

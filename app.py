@@ -794,6 +794,15 @@ def render_validation() -> None:
         f"95% CI on the mean excess: [{ci_lo * 100:+.1f}, {ci_hi * 100:+.1f}] pts"
     )
 
+    atr = metrics["results"].get("baselines", {}).get("atr_rank")
+    if atr:
+        st.caption(
+            f"Volatility-only baseline (rank each day by ATR ratio, no model): per-day AUC "
+            f"{atr['daily_auc_mean']:.3f}, precision@15 {atr['precision_top15_mean'] * 100:.1f}% "
+            f"({atr['excess_precision_top15_mean'] * 100:+.1f} pts vs base). The model's margin over this "
+            f"is its value beyond 'buy the most volatile names'."
+        )
+
     # The caveats ship inside the same artefact as the numbers, so they
     # are always rendered alongside them.
     st.warning("**Read before quoting these numbers**\n\n" + "\n".join(f"- {c}" for c in metrics["caveats"]))
@@ -965,6 +974,13 @@ def render_backtest(metrics: dict, bt: pd.DataFrame) -> None:
     b3.metric("Sharpe (net, rf=0)", f"{net['sharpe']:.2f}", delta=f"{net['sharpe'] - ew['sharpe']:+.2f} vs universe EW")
     b4.metric("Max drawdown (net)", f"{net['max_drawdown'] * 100:.1f}%")
     b5.metric("SPY ann. return", f"{spy['ann_return'] * 100:+.1f}%", help="Same test window, buy and hold.")
+    atr_bt = metrics["results"].get("baselines", {}).get("atr_rank", {}).get("backtest")
+    if atr_bt:
+        st.caption(
+            f"Same book built from the volatility-only ranking: {atr_bt['strategy_net']['ann_return'] * 100:+.1f}%/yr "
+            f"net (Sharpe {atr_bt['strategy_net']['sharpe']:.2f}, max drawdown "
+            f"{atr_bt['strategy_net']['max_drawdown'] * 100:.1f}%)."
+        )
 
     curve = bt.set_index("date")[["strategy_net", "strategy_gross", "universe_ew", "spy"]].fillna(0.0)
     equity = (1.0 + curve).cumprod()
