@@ -81,19 +81,7 @@ def fetch_sp500_constituents() -> pd.DataFrame:
     table cannot be parsed: a silently wrong universe would corrupt
     everything downstream, so this fails loudly.
     """
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {
-        # Mimic a browser request; Wikipedia blocks the default requests user-agent
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/116.0 Safari/537.36"
-        )
-    }
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    tables = pd.read_html(StringIO(response.text))
+    tables = _read_wikipedia_tables("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
     if not tables or "Symbol" not in tables[0].columns:
         raise RuntimeError(
             "Could not parse the S&P 500 constituents table from Wikipedia (the page layout may have changed)."
@@ -116,6 +104,105 @@ def fetch_sp500_constituents() -> pd.DataFrame:
 def fetch_sp500_tickers() -> list[str]:
     """Current S&P 500 symbols in Yahoo Finance format."""
     return fetch_sp500_constituents()["Ticker"].tolist()
+
+
+def _read_wikipedia_tables(url: str) -> list[pd.DataFrame]:
+    headers = {
+        # Mimic a browser request; Wikipedia blocks the default requests user-agent
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/116.0 Safari/537.36"
+        )
+    }
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    return pd.read_html(StringIO(response.text))
+
+
+def fetch_sp500_changes() -> pd.DataFrame:
+    """
+    Index additions and removals from Wikipedia's "Historical components of
+    the S&P 500" article (one row per change, back to 1976).
+
+    Returns columns Date, Added, Removed (tickers in Yahoo format; NaN where a
+    row only added or only removed). Raises RuntimeError if the table is not
+    found, for the same reason fetch_sp500_constituents does.
+    """
+    url = "https://en.wikipedia.org/wiki/Historical_components_of_the_S%26P_500"
+    tables = _read_wikipedia_tables(url)
+    table = next((t for t in tables if any("Removed" in str(c) for c in t.columns)), None)
+    if table is None or table.shape[1] < 5:
+        raise RuntimeError("Could not find the S&P 500 change-history table on Wikipedia.")
+    table = table.iloc[:, :5].copy()
+    table.columns = ["Date", "Added", "Added_Security", "Removed", "Removed_Security"]
+
+    def symbols(col: pd.Series) -> pd.Series:
+        return col.astype("string").str.strip().str.replace(".", "-", regex=False)
+
+    changes = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(table["Date"], errors="coerce"),
+            "Added": symbols(table["Added"]),
+            "Removed": symbols(table["Removed"]),
+        }
+    ).dropna(subset=["Date"])
+    if len(changes) < 100:
+        raise RuntimeError(f"Parsed only {len(changes)} index changes from Wikipedia; expected hundreds.")
+    return changes.reset_index(drop=True)
+
+
+def build_membership(constituents: pd.DataFrame, changes: pd.DataFrame, start: str = DATA_START_DATE) -> pd.DataFrame:
+    """
+    Point-in-time S&P 500 membership intervals from the current constituent
+    table and the change history.
+
+    One row per (ticker, interval) with columns Ticker, Start, End,
+    Is_Current. Current members get [Date_Added, NaT). A ticker removed on or
+    after `start` and not currently in the index gets [last recorded
+    addition before that removal, removal date); Start is NaT when no
+    addition is on record, meaning "member since before the data starts".
+    Removed symbols that coincide with a current symbol (ticker reuse) are
+    skipped rather than risk attaching one company's history to another.
+
+    Membership is by symbol, so a company whose ticker changed while in the
+    index (FB -> META) is covered by its current symbol's history on Yahoo.
+    """
+    start_ts = pd.Timestamp(start)
+    current = set(constituents["Ticker"])
+    rows = [(r.Ticker, r.Date_Added, pd.NaT, True) for r in constituents.itertuples(index=False)]
+
+    removals = changes.dropna(subset=["Removed"])
+    removals = removals[(removals["Date"] >= start_ts) & ~removals["Removed"].isin(current)]
+    additions = changes.dropna(subset=["Added"])
+    for ticker, group in removals.groupby("Removed"):
+        for end in sorted(group["Date"]):
+            prior = additions[(additions["Added"] == ticker) & (additions["Date"] < end)]
+            begin = prior["Date"].max() if len(prior) else pd.NaT
+            rows.append((ticker, begin, end, False))
+
+    membership = pd.DataFrame(rows, columns=["Ticker", "Start", "End", "Is_Current"])
+    membership["Start"] = pd.to_datetime(membership["Start"])
+    membership["End"] = pd.to_datetime(membership["End"])
+    return membership.sort_values(["Ticker", "End"], na_position="last").reset_index(drop=True)
+
+
+def fetch_sp500_membership() -> pd.DataFrame:
+    """Live point-in-time membership table; see build_membership."""
+    return build_membership(fetch_sp500_constituents(), fetch_sp500_changes())
+
+
+def membership_mask(index: pd.DatetimeIndex, intervals: pd.DataFrame) -> np.ndarray:
+    """True where a date falls inside any of a ticker's [Start, End) intervals."""
+    mask = np.zeros(len(index), dtype=bool)
+    for r in intervals.itertuples(index=False):
+        inside = np.ones(len(index), dtype=bool)
+        if pd.notna(r.Start):
+            inside &= index >= r.Start
+        if pd.notna(r.End):
+            inside &= index < r.End
+        mask |= inside
+    return mask
 
 
 def download_market_data(tickers: list[str], start: str = DATA_START_DATE) -> pd.DataFrame:
@@ -323,28 +410,33 @@ def build_master_dataframe(
     tickers_limit: int | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
-    Fetches data and builds the labelled master feature panel for the whole universe.
+    Fetches data and builds the labelled master feature panel for the
+    point-in-time S&P 500 universe.
 
     Returns (master_df, metadata):
       - master_df: one row per (date, ticker) on the union yfinance calendar
         (tz-naive DatetimeIndex), with OHLCV, Ticker, all FEATURE_COLUMNS and
         Target. Features are computed on each ticker's full price history,
-        but rows dated before the ticker joined the S&P 500 are dropped: the
-        stock existed then, but it was not in the universe this screener
-        ranks. No dropna is applied here; callers (training, prediction,
-        walk-forward evaluation) do their own filtering.
-      - metadata: download timestamp, ticker list, last price date and the
-        join-date truncation summary, so downstream artefacts can record
-        exactly which data snapshot they used.
+        but a row is kept only for dates on which the ticker was an index
+        member (see build_membership): current members from their join date,
+        and companies removed since `start` up to their removal date, where
+        Yahoo still has their prices. No dropna is applied here; callers do
+        their own filtering.
+      - metadata: download timestamp, ticker lists, last price date and a
+        universe summary (how many removed tickers could and could not be
+        recovered), so downstream artefacts record exactly what was used.
     """
-    print("Fetching live S&P 500 constituent table from Wikipedia...")
-    constituents = fetch_sp500_constituents()
+    print("Fetching S&P 500 constituents and change history from Wikipedia...")
+    membership = fetch_sp500_membership()
     if tickers_limit is not None:
-        constituents = constituents.head(tickers_limit)
-    tickers = constituents["Ticker"].tolist()
-    join_dates = dict(zip(constituents["Ticker"], constituents["Date_Added"], strict=True))
+        # Smoke runs: first N current members only, no removed tickers.
+        keep = membership.loc[membership["Is_Current"], "Ticker"].head(tickers_limit)
+        membership = membership[membership["Ticker"].isin(keep)]
+    tickers = membership["Ticker"].unique().tolist()
+    current_set = set(membership.loc[membership["Is_Current"], "Ticker"])
+    removed_set = set(tickers) - current_set
 
-    print(f"Downloading market data for {len(tickers)} stocks since {start}...")
+    print(f"Downloading market data for {len(tickers)} stocks ({len(removed_set)} former members) since {start}...")
     raw_data = download_market_data(tickers, start=start)
 
     # Tickers that returned no data at all cannot be processed
@@ -353,24 +445,24 @@ def build_master_dataframe(
 
     print("Engineering features for all tickers...")
     frames = []
-    n_truncated = 0
     for ticker in available:
         df = process_ticker(ticker, raw_data)
-        joined = join_dates.get(ticker)
-        if pd.notna(joined) and joined > df.index.min():
-            df = df[df.index >= joined]
-            n_truncated += 1
-        frames.append(df)
+        intervals = membership[membership["Ticker"] == ticker]
+        frames.append(df[membership_mask(df.index, intervals)])
     master_df = pd.concat(frames)
+    master_df = master_df[master_df["Close"].notna()]
 
     metadata = {
         "download_timestamp_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tickers": available,
+        "current_tickers": [t for t in available if t in current_set],
         "last_price_date": str(master_df.index.max().date()),
-        "join_date_truncation": {
-            "applied": True,
-            "n_tickers_truncated": n_truncated,
-            "n_tickers_unknown_join_date": int(sum(pd.isna(join_dates.get(t)) for t in available)),
+        "universe": {
+            "type": "point_in_time",
+            "n_current": len(current_set & with_data),
+            "n_removed_since_start": len(removed_set),
+            "n_removed_with_price_data": len(removed_set & with_data),
+            "removed_without_price_data": sorted(removed_set - with_data),
         },
     }
     return master_df, metadata
@@ -384,10 +476,18 @@ class Dataset(NamedTuple):
 
 def build_dataset(tickers_limit: int | None = None) -> Dataset:
     """Builds the frames the screener needs from one download."""
-    master_df, _ = build_master_dataframe(tickers_limit=tickers_limit)
+    master_df, metadata = build_master_dataframe(tickers_limit=tickers_limit)
 
     train_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"]).copy()
-    latest_df = master_df.dropna(subset=FEATURE_COLUMNS).groupby("Ticker").tail(1).copy()
+    # Only current members can be today's candidates; a former member's last
+    # row sits at its removal date.
+    latest_df = (
+        master_df[master_df["Ticker"].isin(metadata["current_tickers"])]
+        .dropna(subset=FEATURE_COLUMNS)
+        .groupby("Ticker")
+        .tail(1)
+        .copy()
+    )
     return Dataset(train_df, latest_df, master_df)
 
 

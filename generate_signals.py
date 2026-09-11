@@ -7,6 +7,9 @@ Runs the full S&P 500 screening pipeline and writes the dashboard's inputs:
                                 Signal_Pool, generated_at (UTC ISO-8601)
     data/candidate_prices.csv   PRICE_HISTORY_DAYS of adjusted closes for the
                                 candidates (Monte Carlo tab input)
+    data/signal_history.csv     append-only log of every run's leaderboard, so
+                                the sentiment filter can be scored once enough
+                                runs have resolved
 
 Runs weekly in GitHub Actions (.github/workflows/refresh-signals.yml) and
 can be run locally; it never executes inside the deployed app.
@@ -23,7 +26,7 @@ import os
 
 import pandas as pd
 
-from config import CANDIDATE_PRICES_PATH, DATA_DIR, SIGNALS_PATH
+from config import CANDIDATE_PRICES_PATH, DATA_DIR, SIGNAL_HISTORY_PATH, SIGNALS_PATH
 from screener import parse_args, print_results, quiet_third_party_warnings, run_pipeline
 
 
@@ -41,6 +44,10 @@ def save_signals(leaderboard: pd.DataFrame, candidate_prices: pd.DataFrame) -> N
         f"Price history written to {CANDIDATE_PRICES_PATH}  "
         f"({candidate_prices.shape[0]} days x {candidate_prices.shape[1]} tickers)"
     )
+
+    history = leaderboard.assign(price_date=str(candidate_prices.index.max().date()))
+    history.to_csv(SIGNAL_HISTORY_PATH, mode="a", index=False, header=not os.path.exists(SIGNAL_HISTORY_PATH))
+    print(f"Run appended to {SIGNAL_HISTORY_PATH}")
 
 
 def main() -> None:
