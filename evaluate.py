@@ -63,6 +63,14 @@ CALIBRATION_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
 
 SCHEMA_VERSION = 1
 
+
+def _roc_auc(y, p) -> float:
+    """ROC AUC via scikit-learn, imported lazily so importing this module
+    (tests, the dashboard's docs) does not require sklearn."""
+    from sklearn.metrics import roc_auc_score
+
+    return float(roc_auc_score(y, p))
+
 # Features computed by build_technical_features from a single ticker's OHLCV.
 # The remaining FEATURE_COLUMNS are macro pct_changes/shifts, causal by
 # construction; rolling/ewm windows checked here are the only nontrivial
@@ -348,10 +356,13 @@ def daily_aggregates(daily: pd.DataFrame, seed: int = 42) -> dict:
     }
 
 
-def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    """Scores one fold's test set: per-day metrics, fold summary, calibration."""
-    from sklearn.metrics import roc_auc_score
+def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame, np.ndarray]:
+    """Scores one fold's test set.
 
+    Returns (daily metrics, fold summary, calibration bins, p_hat), where
+    p_hat is the test-row prediction vector in test_df order so the caller
+    can pool it without predicting a second time.
+    """
     test_df = test_df.copy()
     test_df["p_hat"] = model.predict_proba(test_df[FEATURE_COLUMNS])[:, 1]
 
@@ -367,7 +378,7 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
     p = test_df["p_hat"].to_numpy()
     summary = {
         "fold_id": fold.fold_id,
-        "roc_auc": float(roc_auc_score(y, p)),
+        "roc_auc": _roc_auc(y, p),
         "brier": float(np.mean((p - y) ** 2)),
         "base_rate": float(y.mean()),
         "n_test_rows": int(len(y)),
@@ -376,7 +387,7 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
 
     calib = reliability_bins(y, p)
     calib.insert(0, "fold_id", str(fold.fold_id))
-    return daily, summary, calib
+    return daily, summary, calib, p
 
 
 # =============================================================================
@@ -397,8 +408,6 @@ def run_evaluation(
     Returns (results, daily_df, calibration_df); results holds the fold
     table plus per-fold, pooled and overall-daily metrics.
     """
-    from sklearn.metrics import roc_auc_score
-
     cal = master_df.index.unique().sort_values()
     if causality_check:
         feature_causality_check(master_df, seed=seed)
@@ -422,11 +431,9 @@ def run_evaluation(
 
         # Train-vs-test generalisation gap (console evidence only): a
         # near-zero gap would suggest test rows contaminated the pool.
-        train_auc = float(
-            roc_auc_score(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
-        )
+        train_auc = _roc_auc(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
 
-        daily, summary, calib = evaluate_fold(model, test, fold)
+        daily, summary, calib, p_hat = evaluate_fold(model, test, fold)
 
         fold_table.append(
             {
@@ -447,8 +454,7 @@ def run_evaluation(
         all_daily.append(daily)
         all_calib.append(calib)
         pooled_y.append(test["Target"].to_numpy())
-        # Recompute predictions once, reuse for pooling
-        pooled_p.append(model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        pooled_p.append(p_hat)
 
         elapsed = time.perf_counter() - t0
         print(
@@ -485,7 +491,7 @@ def run_evaluation(
         "folds": fold_table,
         "per_fold": per_fold,
         "pooled": {
-            "roc_auc": float(roc_auc_score(y_pooled, p_pooled)),
+            "roc_auc": _roc_auc(y_pooled, p_pooled),
             "brier": float(np.mean((p_pooled - y_pooled) ** 2)),
             "base_rate": float(y_pooled.mean()),
             "n_rows": int(len(y_pooled)),
@@ -502,14 +508,12 @@ def _shuffled_target_test(train: pd.DataFrame, test: pd.DataFrame, seed: int = 4
     AUC lands away from 0.5, information reaches the test set through
     something other than the labels.
     """
-    from sklearn.metrics import roc_auc_score
-
     print("Running shuffled-target leakage check (refits fold 1)...")
     rng = np.random.default_rng(seed)
     shuffled = train.copy()
     shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
     model = train_model(shuffled)
-    auc = float(roc_auc_score(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1]))
+    auc = _roc_auc(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
     verdict = "OK" if 0.48 <= auc <= 0.52 else "WARNING: investigate before publishing"
     print(f"  Shuffled-target test AUC = {auc:.4f} (expected ~0.5): {verdict}")
 
@@ -526,8 +530,6 @@ def _purge_ablation_test(
     purge and compare AUC on the first 10 test days. Console evidence only,
     never written to the committed artefacts.
     """
-    from sklearn.metrics import roc_auc_score
-
     print("Running purge-ablation check (refits fold 1 without the purge)...")
     pos = int(cal.searchsorted(fold.test_start))
     unpurged_train = valid_df[valid_df.index <= cal[pos - 1]]
@@ -536,8 +538,8 @@ def _purge_ablation_test(
     first_days = test.index.unique().sort_values()[:10]
     early = test[test.index.isin(first_days)]
     y = early["Target"].to_numpy()
-    auc_unpurged = float(roc_auc_score(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
-    auc_purged = float(roc_auc_score(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
+    auc_unpurged = _roc_auc(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
+    auc_purged = _roc_auc(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
     print(
         f"  First 10 test days: purged AUC {auc_purged:.4f}, "
         f"unpurged AUC {auc_unpurged:.4f} "

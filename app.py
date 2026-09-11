@@ -1,6 +1,7 @@
 """
 app.py: S&P 500 AI Screener dashboard
-Reads data/latest_signals.csv produced by generate_signals.py.
+Reads data/latest_signals.csv produced by generate_signals.py and the
+validation artefacts written by evaluate.py.
 Deploy to Streamlit Community Cloud; no heavy ML dependencies required.
 """
 
@@ -16,75 +17,80 @@ import streamlit as st
 import yfinance as yf
 
 # =============================================================================
-# PAGE CONFIG
+# CONFIGURATION
 # =============================================================================
 
-st.set_page_config(
-    page_title="S&P 500 AI Screener",
-    page_icon="📈",
-    layout="wide",
-)
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+SIGNALS_PATH = os.path.join(DATA_DIR, "latest_signals.csv")
+VALIDATION_METRICS_PATH = os.path.join(DATA_DIR, "validation_metrics.json")
+VALIDATION_DAILY_PATH = os.path.join(DATA_DIR, "validation_daily.csv")
+VALIDATION_CALIB_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
 
-# =============================================================================
-# THEME / GLOBAL STYLING
-# =============================================================================
+# Long/short confluence thresholds (percent confidence). Kept in sync by hand
+# with LONG_CONFIDENCE_PCT / SHORT_CONFIDENCE_PCT in screener.py; the app does
+# not import screener so the deployed dashboard never pulls pipeline deps.
+LONG_CONFIDENCE_PCT = 55.0
+SHORT_CONFIDENCE_PCT = 45.0
 
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-    :root{
-      --bg:#0B0E16; --card:#141A24; --card2:#10151E; --border:rgba(255,255,255,.07);
-      --muted:#8B95A7; --text:#E6EAF2; --accent:#6366F1; --accent2:#818CF8;
-      --pos:#34D399; --neg:#F87171;
-    }
-    html,body,[class*="css"],.stApp{font-family:'Inter',system-ui,-apple-system,sans-serif;}
-    .stApp{background:radial-gradient(1100px 560px at 82% -8%,rgba(99,102,241,.10),transparent 60%),var(--bg);}
-    #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important;}
-    .block-container{padding-top:2.2rem;padding-bottom:3rem;max-width:1320px;}
+LONG_LABEL = f"Long candidates (Conf > {LONG_CONFIDENCE_PCT:.0f}%, Sent > 0)"
+SHORT_LABEL = f"Short candidates (Conf < {SHORT_CONFIDENCE_PCT:.0f}%, Sent < 0)"
 
-    .hero-badge{display:inline-flex;align-items:center;gap:7px;font-size:.72rem;font-weight:600;
-      letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);background:rgba(99,102,241,.12);
-      border:1px solid rgba(99,102,241,.25);padding:5px 12px;border-radius:999px;margin-bottom:14px;}
-    .hero-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--pos);box-shadow:0 0 8px var(--pos);}
-    .hero h1{font-size:2.6rem;font-weight:800;letter-spacing:-.02em;margin:0 0 6px 0;line-height:1.1;
-      background:linear-gradient(92deg,#fff 10%,#B9C0FF 60%,#818CF8 100%);-webkit-background-clip:text;
-      background-clip:text;-webkit-text-fill-color:transparent;}
-    .hero p{color:var(--muted);font-size:1.02rem;margin:0;max-width:760px;line-height:1.5;}
+MC_HORIZONS = {"1 month (21 days)": 21, "3 months (63 days)": 63, "1 year (252 days)": 252}
 
-    .disclaimer{margin:18px 0 6px 0;padding:11px 16px;font-size:.86rem;color:#E2D3AE;
-      background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.22);
-      border-left:3px solid #FBBF24;border-radius:10px;}
-
-    [data-testid="stMetric"]{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);
-      border:1px solid var(--border);border-radius:16px;padding:18px 20px;
-      box-shadow:0 1px 2px rgba(0,0,0,.35);transition:border-color .15s,transform .15s;}
-    [data-testid="stMetric"]:hover{border-color:rgba(99,102,241,.45);transform:translateY(-2px);}
-    [data-testid="stMetricLabel"] p{color:var(--muted)!important;font-size:.72rem!important;font-weight:600!important;
-      text-transform:uppercase;letter-spacing:.05em;}
-    [data-testid="stMetricValue"]{font-weight:700;font-size:1.7rem;letter-spacing:-.01em;}
-
-    [data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid var(--border);}
-    button[data-baseweb="tab"]{font-weight:600;font-size:.95rem;padding:10px 4px;}
-    [data-baseweb="tab-highlight"]{background:var(--accent)!important;height:3px;border-radius:3px;}
-
-    [data-testid="stDataFrame"]{border:1px solid var(--border);border-radius:14px;overflow:hidden;}
-    [data-testid="stExpander"]{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.015);}
-
-    .footer{color:var(--muted);font-size:.85rem;text-align:center;padding-top:6px;}
-    .footer a{color:var(--accent2);text-decoration:none;}
-    .footer a:hover{text-decoration:underline;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# Shared Plotly styling so every chart matches the dark theme.
+ACCENT = "#6366F1"
+MUTED = "#8B95A7"
 _GRID = "rgba(255,255,255,0.06)"
+
+PAGE_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root{
+  --bg:#0B0E16; --card:#141A24; --card2:#10151E; --border:rgba(255,255,255,.07);
+  --muted:#8B95A7; --text:#E6EAF2; --accent:#6366F1; --accent2:#818CF8;
+  --pos:#34D399; --neg:#F87171;
+}
+html,body,[class*="css"],.stApp{font-family:'Inter',system-ui,-apple-system,sans-serif;}
+.stApp{background:radial-gradient(1100px 560px at 82% -8%,rgba(99,102,241,.10),transparent 60%),var(--bg);}
+#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important;}
+.block-container{padding-top:2.2rem;padding-bottom:3rem;max-width:1320px;}
+
+.hero-badge{display:inline-flex;align-items:center;gap:7px;font-size:.72rem;font-weight:600;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);background:rgba(99,102,241,.12);
+  border:1px solid rgba(99,102,241,.25);padding:5px 12px;border-radius:999px;margin-bottom:14px;}
+.hero-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--pos);box-shadow:0 0 8px var(--pos);}
+.hero h1{font-size:2.6rem;font-weight:800;letter-spacing:-.02em;margin:0 0 6px 0;line-height:1.1;
+  background:linear-gradient(92deg,#fff 10%,#B9C0FF 60%,#818CF8 100%);-webkit-background-clip:text;
+  background-clip:text;-webkit-text-fill-color:transparent;}
+.hero p{color:var(--muted);font-size:1.02rem;margin:0;max-width:760px;line-height:1.5;}
+
+.disclaimer{margin:18px 0 6px 0;padding:11px 16px;font-size:.86rem;color:#E2D3AE;
+  background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.22);
+  border-left:3px solid #FBBF24;border-radius:10px;}
+
+[data-testid="stMetric"]{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);
+  border:1px solid var(--border);border-radius:16px;padding:18px 20px;
+  box-shadow:0 1px 2px rgba(0,0,0,.35);transition:border-color .15s,transform .15s;}
+[data-testid="stMetric"]:hover{border-color:rgba(99,102,241,.45);transform:translateY(-2px);}
+[data-testid="stMetricLabel"] p{color:var(--muted)!important;font-size:.72rem!important;font-weight:600!important;
+  text-transform:uppercase;letter-spacing:.05em;}
+[data-testid="stMetricValue"]{font-weight:700;font-size:1.7rem;letter-spacing:-.01em;}
+
+[data-baseweb="tab-list"]{gap:6px;border-bottom:1px solid var(--border);}
+button[data-baseweb="tab"]{font-weight:600;font-size:.95rem;padding:10px 4px;}
+[data-baseweb="tab-highlight"]{background:var(--accent)!important;height:3px;border-radius:3px;}
+
+[data-testid="stDataFrame"]{border:1px solid var(--border);border-radius:14px;overflow:hidden;}
+[data-testid="stExpander"]{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.015);}
+
+.footer{color:var(--muted);font-size:.85rem;text-align:center;padding-top:6px;}
+.footer a{color:var(--accent2);text-decoration:none;}
+.footer a:hover{text-decoration:underline;}
+</style>
+"""
 
 
 def style_plotly(fig, height=None):
+    """Shared Plotly styling so every chart matches the dark theme."""
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -100,235 +106,32 @@ def style_plotly(fig, height=None):
     fig.update_yaxes(gridcolor=_GRID, zerolinecolor=_GRID, linecolor=_GRID)
     return fig
 
-# =============================================================================
-# DISCLAIMER + HEADER
-# =============================================================================
 
-st.markdown(
-    """
-    <div class="hero">
-      <div class="hero-badge"><span class="dot"></span> S&amp;P 500 · XGBoost + FinBERT · Updated weekly</div>
-      <h1>S&amp;P 500 stock screener</h1>
-      <p>XGBoost signals across the S&amp;P 500, combined with FinBERT news sentiment,
-      with a Monte Carlo simulator for portfolio risk and walk-forward validation
-      of the classifier.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="disclaimer">⚠️ <b>Educational project, not financial advice.</b> '
-    "Past model performance does not guarantee future results; do not make "
-    "investment decisions based on this tool.</div>",
-    unsafe_allow_html=True,
-)
+def is_long(df: pd.DataFrame) -> pd.Series:
+    return (df["Confidence"] > LONG_CONFIDENCE_PCT) & (df["Sentiment_Score"] > 0)
+
+
+def is_short(df: pd.DataFrame) -> pd.Series:
+    return (df["Confidence"] < SHORT_CONFIDENCE_PCT) & (df["Sentiment_Score"] < 0)
+
 
 # =============================================================================
-# LOAD DATA
+# DATA LOADING
 # =============================================================================
-
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "latest_signals.csv")
-
 
 @st.cache_data(ttl=3600)
-def load_data(path: str) -> pd.DataFrame:
+def load_signals(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-if not os.path.exists(DATA_PATH):
-    st.warning(
-        "No signals file found at `data/latest_signals.csv`. "
-        "Run `python generate_signals.py` locally to generate it, "
-        "then commit the file to the repository."
-    )
-    st.stop()
+@st.cache_data(ttl=3600)
+def load_validation_artefacts():
+    with open(VALIDATION_METRICS_PATH) as f:
+        metrics = json.load(f)
+    daily = pd.read_csv(VALIDATION_DAILY_PATH, parse_dates=["date"])
+    calib = pd.read_csv(VALIDATION_CALIB_PATH)
+    return metrics, daily, calib
 
-df = load_data(DATA_PATH)
-
-# =============================================================================
-# LAST UPDATED TIMESTAMP
-# =============================================================================
-
-if "generated_at" in df.columns:
-    generated_at = df["generated_at"].iloc[0]
-    st.caption(f"Last updated: **{generated_at} UTC**")
-else:
-    st.caption("Last updated: timestamp not available")
-
-# =============================================================================
-# SIDEBAR FILTERS (apply to Screener tab only)
-# =============================================================================
-
-st.sidebar.header("Screener Filters")
-
-conf_lo = float(np.floor(df["Confidence"].min() * 10) / 10)
-conf_hi = float(np.ceil(df["Confidence"].max() * 10) / 10)
-if conf_lo == conf_hi:  # single candidate / all-equal confidence -> avoid slider crash
-    conf_hi = conf_lo + 0.1
-conf_range = st.sidebar.slider(
-    "Confidence (%)",
-    min_value=conf_lo,
-    max_value=conf_hi,
-    value=(conf_lo, conf_hi),
-    step=0.1,
-)
-
-# A blank Sentiment_Score means no news was available at generation time;
-# NaN rows are kept visible and must not break the slider bounds.
-sent_values = df["Sentiment_Score"].dropna()
-if sent_values.empty:
-    sent_lo, sent_hi = -1.0, 1.0
-else:
-    sent_lo = float(np.floor(sent_values.min() * 100) / 100)
-    sent_hi = float(np.ceil(sent_values.max() * 100) / 100)
-if sent_lo == sent_hi:
-    sent_hi = sent_lo + 0.01
-sent_range = st.sidebar.slider(
-    "Sentiment Score",
-    min_value=sent_lo,
-    max_value=sent_hi,
-    value=(sent_lo, sent_hi),
-    step=0.01,
-)
-
-signal_filter = st.sidebar.radio(
-    "Signal type",
-    options=["All", "Long candidates (Conf > 55%, Sent > 0)", "Short candidates (Conf < 45%, Sent < 0)"],
-)
-
-# Apply filters. Rows with missing sentiment pass the sentiment filter so
-# that "no news available" does not silently hide a candidate.
-filtered = df[
-    (df["Confidence"] >= conf_range[0]) &
-    (df["Confidence"] <= conf_range[1]) &
-    (
-        df["Sentiment_Score"].isna() |
-        ((df["Sentiment_Score"] >= sent_range[0]) & (df["Sentiment_Score"] <= sent_range[1]))
-    )
-].copy()
-
-if signal_filter.startswith("Long"):
-    filtered = filtered[(filtered["Confidence"] > 55) & (filtered["Sentiment_Score"] > 0)]
-elif signal_filter.startswith("Short"):
-    filtered = filtered[(filtered["Confidence"] < 45) & (filtered["Sentiment_Score"] < 0)]
-
-# =============================================================================
-# TABS
-# =============================================================================
-
-tab_screener, tab_mc, tab_validation = st.tabs(
-    ["Screener", "Monte Carlo Risk", "Model Validation"]
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 1: SCREENER
-# ─────────────────────────────────────────────────────────────────────────────
-
-with tab_screener:
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total candidates", len(df))
-    col2.metric("Matching filters", len(filtered))
-    col3.metric("Long signals", int(((df["Confidence"] > 55) & (df["Sentiment_Score"] > 0)).sum()))
-    col4.metric("Short signals", int(((df["Confidence"] < 45) & (df["Sentiment_Score"] < 0)).sum()))
-
-    st.divider()
-    st.subheader("Screener Leaderboard")
-
-    display_cols = ["Ticker", "Close", "Confidence", "Sentiment_Score"]
-    display_df = filtered[display_cols].sort_values("Confidence", ascending=False).reset_index(drop=True)
-    display_df.index += 1
-
-    st.dataframe(display_df, width="stretch", height=400)
-    st.caption(
-        "A blank sentiment score means no news was available for that ticker "
-        "at generation time; it does not mean neutral sentiment."
-    )
-
-    st.divider()
-
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        st.subheader("Top 10 by Confidence")
-        top10 = df.nlargest(10, "Confidence").sort_values("Confidence")
-        fig_bar = px.bar(
-            top10,
-            x="Confidence", y="Ticker", orientation="h",
-            color="Confidence", color_continuous_scale="RdYlGn",
-            labels={"Confidence": "Confidence (%)"},
-            title="Top 10 by Model Confidence",
-        )
-        fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(style_plotly(fig_bar), width="stretch")
-
-    with col_right:
-        st.subheader("Confidence vs Sentiment")
-        fig_scatter = px.scatter(
-            df, x="Sentiment_Score", y="Confidence", text="Ticker",
-            color="Confidence", color_continuous_scale="RdYlGn",
-            labels={"Sentiment_Score": "FinBERT Sentiment Score",
-                    "Confidence": "XGBoost Confidence (%)"},
-            title="Signal Map",
-        )
-        fig_scatter.update_traces(textposition="top center", marker_size=8)
-        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
-        fig_scatter.add_hline(y=55, line_dash="dash", line_color="green", opacity=0.5,
-                              annotation_text="Long threshold", annotation_position="right")
-        fig_scatter.add_hline(y=45, line_dash="dash", line_color="red", opacity=0.5,
-                              annotation_text="Short threshold", annotation_position="right")
-        fig_scatter.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(style_plotly(fig_scatter), width="stretch")
-
-    st.divider()
-
-    with st.expander("How this works"):
-        st.markdown(
-            """
-            This screener combines two complementary signals to identify long and short
-            candidates across the S&P 500.
-
-            **Stage 1: XGBoost classifier (quantitative signal)**
-
-            An XGBoost gradient-boosting model is trained on 10+ years of daily price data
-            across all S&P 500 constituents (~1.3 million observations). The target label uses
-            the *triple-barrier method*: for each trading day, the model asks whether the stock
-            will hit a +4% take-profit *before* it hits a −4% stop-loss within the next 5 trading
-            days. This is more realistic than simple N-day forward returns because it mirrors
-            how a real trade with risk management plays out.
-
-            Features include momentum indicators (RSI, MACD, lagged returns), volatility
-            measures (Bollinger Band position, ATR ratio), volume signals (VWAP deviation,
-            volume surge), macro context (SPY, QQQ, SMH, VIX, 10Y Treasury), and
-            relative performance vs benchmarks. One model is trained across all tickers so
-            it learns cross-sectional patterns rather than fitting to any single stock's history.
-
-            **Stage 2: FinBERT sentiment analysis (qualitative signal)**
-
-            The top 15 and bottom 5 candidates by XGBoost confidence are passed to
-            [FinBERT](https://huggingface.co/ProsusAI/finbert), a BERT model fine-tuned on
-            financial news, analyst reports, and earnings call transcripts. Live headlines
-            are fetched for each candidate and scored. The final sentiment score is the
-            mean signed score across up to 10 recent headlines.
-
-            **Interpreting the output**
-
-            | Signal | Condition |
-            |--------|-----------|
-            | Long candidate | Confidence > 55% **and** Sentiment > 0 |
-            | Short candidate | Confidence < 45% **and** Sentiment < 0 |
-
-            High confidence alone is not a buy signal: both the quantitative and qualitative
-            signals should align. Mixed signals (high confidence, negative sentiment) warrant
-            caution.
-            """
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 2: MONTE CARLO RISK
-# ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
@@ -346,7 +149,7 @@ def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
                 list(tickers), period=period, progress=False,
                 auto_adjust=True, threads=True,
             )
-        except Exception:  # noqa: BLE001 - transient network/yfinance failure
+        except Exception:  # transient network/yfinance failure
             raw = None
         if raw is not None and not raw.empty:
             break
@@ -366,6 +169,10 @@ def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
     enough = prices.columns[prices.notna().sum() >= 60]
     return prices[enough].dropna()
 
+
+# =============================================================================
+# MONTE CARLO ENGINE
+# =============================================================================
 
 def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
     """Lower-triangular Cholesky factor of a correlation matrix.
@@ -410,9 +217,9 @@ def simulate_growth(
     """
     rng = np.random.default_rng(seed)
 
-    mu    = log_ret.mean().values          # daily mean log-return per asset
-    sigma = log_ret.std().values           # daily vol per asset
-    L     = _safe_cholesky(log_ret.corr().values)
+    mu = log_ret.mean().values          # daily mean log-return per asset
+    sigma = log_ret.std().values        # daily vol per asset
+    L = _safe_cholesky(log_ret.corr().values)
     n_assets = len(mu)
 
     # iid standard normals, then correlate: (n_paths, horizon, n_assets)
@@ -428,7 +235,7 @@ def simulate_growth(
     # Equal-weighted (in log space) portfolio log-return each day
     w = np.ones(n_assets) / n_assets
     port_daily = daily_log_ret @ w                   # (n_paths, horizon)
-    port_cum   = np.cumsum(port_daily, axis=1)       # (n_paths, horizon)
+    port_cum = np.cumsum(port_daily, axis=1)         # (n_paths, horizon)
 
     growth = np.exp(
         np.concatenate([np.zeros((n_paths, 1)), port_cum], axis=1)
@@ -437,7 +244,184 @@ def simulate_growth(
     return growth
 
 
-with tab_mc:
+# =============================================================================
+# PAGE SECTIONS
+# =============================================================================
+
+def render_header() -> None:
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="hero">
+          <div class="hero-badge"><span class="dot"></span> S&amp;P 500 · XGBoost + FinBERT · Updated weekly</div>
+          <h1>S&amp;P 500 stock screener</h1>
+          <p>XGBoost signals across the S&amp;P 500, combined with FinBERT news sentiment,
+          with a Monte Carlo simulator for portfolio risk and walk-forward validation
+          of the classifier.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="disclaimer">⚠️ <b>Educational project, not financial advice.</b> '
+        "Past model performance does not guarantee future results; do not make "
+        "investment decisions based on this tool.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_footer() -> None:
+    st.divider()
+    st.markdown(
+        '<div class="footer">Built by <b>Ethan Buckley</b> &nbsp;·&nbsp; '
+        '<a href="https://github.com/ethanbuckley" target="_blank">GitHub</a> &nbsp;·&nbsp; '
+        '<a href="https://www.linkedin.com/in/ethan-buckley/" target="_blank">LinkedIn</a></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
+    """Sidebar controls; returns the filtered signals frame for the Screener tab."""
+    st.sidebar.header("Screener Filters")
+
+    conf_lo = float(np.floor(df["Confidence"].min() * 10) / 10)
+    conf_hi = float(np.ceil(df["Confidence"].max() * 10) / 10)
+    if conf_lo == conf_hi:  # single candidate / all-equal confidence -> avoid slider crash
+        conf_hi = conf_lo + 0.1
+    conf_range = st.sidebar.slider(
+        "Confidence (%)", min_value=conf_lo, max_value=conf_hi, value=(conf_lo, conf_hi), step=0.1,
+    )
+
+    # A blank Sentiment_Score means no news was available at generation time;
+    # NaN rows are kept visible and must not break the slider bounds.
+    sent_values = df["Sentiment_Score"].dropna()
+    if sent_values.empty:
+        sent_lo, sent_hi = -1.0, 1.0
+    else:
+        sent_lo = float(np.floor(sent_values.min() * 100) / 100)
+        sent_hi = float(np.ceil(sent_values.max() * 100) / 100)
+    if sent_lo == sent_hi:
+        sent_hi = sent_lo + 0.01
+    sent_range = st.sidebar.slider(
+        "Sentiment Score", min_value=sent_lo, max_value=sent_hi, value=(sent_lo, sent_hi), step=0.01,
+    )
+
+    signal_filter = st.sidebar.radio("Signal type", options=["All", LONG_LABEL, SHORT_LABEL])
+
+    # Rows with missing sentiment pass the sentiment filter so that
+    # "no news available" does not silently hide a candidate.
+    in_conf = df["Confidence"].between(conf_range[0], conf_range[1])
+    in_sent = df["Sentiment_Score"].isna() | df["Sentiment_Score"].between(sent_range[0], sent_range[1])
+    filtered = df[in_conf & in_sent].copy()
+
+    if signal_filter == LONG_LABEL:
+        filtered = filtered[is_long(filtered)]
+    elif signal_filter == SHORT_LABEL:
+        filtered = filtered[is_short(filtered)]
+    return filtered
+
+
+def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total candidates", len(df))
+    col2.metric("Matching filters", len(filtered))
+    col3.metric("Long signals", int(is_long(df).sum()))
+    col4.metric("Short signals", int(is_short(df).sum()))
+
+    st.divider()
+    st.subheader("Screener Leaderboard")
+
+    display_cols = ["Ticker", "Close", "Confidence", "Sentiment_Score"]
+    display_df = filtered[display_cols].sort_values("Confidence", ascending=False).reset_index(drop=True)
+    display_df.index += 1
+
+    st.dataframe(display_df, width="stretch", height=400)
+    st.caption(
+        "A blank sentiment score means no news was available for that ticker "
+        "at generation time; it does not mean neutral sentiment."
+    )
+
+    st.divider()
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.subheader("Top 10 by Confidence")
+        top10 = df.nlargest(10, "Confidence").sort_values("Confidence")
+        fig_bar = px.bar(
+            top10,
+            x="Confidence", y="Ticker", orientation="h",
+            color="Confidence", color_continuous_scale="RdYlGn",
+            labels={"Confidence": "Confidence (%)"},
+            title="Top 10 by Model Confidence",
+        )
+        fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(style_plotly(fig_bar), width="stretch")
+
+    with col_right:
+        st.subheader("Confidence vs Sentiment")
+        fig_scatter = px.scatter(
+            df, x="Sentiment_Score", y="Confidence", text="Ticker",
+            color="Confidence", color_continuous_scale="RdYlGn",
+            labels={"Sentiment_Score": "FinBERT Sentiment Score",
+                    "Confidence": "XGBoost Confidence (%)"},
+            title="Signal Map",
+        )
+        fig_scatter.update_traces(textposition="top center", marker_size=8)
+        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+        fig_scatter.add_hline(y=LONG_CONFIDENCE_PCT, line_dash="dash", line_color="green", opacity=0.5,
+                              annotation_text="Long threshold", annotation_position="right")
+        fig_scatter.add_hline(y=SHORT_CONFIDENCE_PCT, line_dash="dash", line_color="red", opacity=0.5,
+                              annotation_text="Short threshold", annotation_position="right")
+        fig_scatter.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(style_plotly(fig_scatter), width="stretch")
+
+    st.divider()
+
+    with st.expander("How this works"):
+        st.markdown(
+            f"""
+            This screener combines two complementary signals to identify long and short
+            candidates across the S&P 500.
+
+            **Stage 1: XGBoost classifier (quantitative signal)**
+
+            An XGBoost gradient-boosting model is trained on 10+ years of daily price data
+            across all S&P 500 constituents (~1.3 million observations). The target label uses
+            the *triple-barrier method*: for each trading day, the model asks whether the stock
+            will hit a +4% take-profit *before* it hits a −4% stop-loss within the next 5 trading
+            days. This is more realistic than simple N-day forward returns because it mirrors
+            how a real trade with risk management plays out.
+
+            Features include momentum indicators (RSI, MACD, lagged returns), volatility
+            measures (Bollinger Band position, ATR ratio), volume signals (VWAP deviation,
+            volume surge), macro context (SPY, QQQ, SMH, VIX, 10Y Treasury), and
+            relative performance vs benchmarks. One model is trained across all tickers so
+            it learns cross-sectional patterns rather than fitting to any single stock's history.
+
+            **Stage 2: FinBERT sentiment analysis (qualitative signal)**
+
+            The top 15 and bottom 5 candidates by XGBoost confidence are passed to
+            [FinBERT](https://huggingface.co/ProsusAI/finbert), a BERT model fine-tuned on
+            financial news, analyst reports, and earnings call transcripts. Live headlines
+            are fetched for each candidate and scored. The final sentiment score is the
+            mean signed score across up to 10 recent headlines.
+
+            **Interpreting the output**
+
+            | Signal | Condition |
+            |--------|-----------|
+            | Long candidate | Confidence > {LONG_CONFIDENCE_PCT:.0f}% **and** Sentiment > 0 |
+            | Short candidate | Confidence < {SHORT_CONFIDENCE_PCT:.0f}% **and** Sentiment < 0 |
+
+            High confidence alone is not a buy signal: both the quantitative and qualitative
+            signals should align. Mixed signals (high confidence, negative sentiment) warrant
+            caution.
+            """
+        )
+
+
+def render_monte_carlo(df: pd.DataFrame) -> None:
     st.subheader("Monte Carlo Portfolio Risk Simulation")
     st.markdown(
         "Simulates thousands of possible future portfolio paths using geometric "
@@ -459,28 +443,27 @@ with tab_mc:
             max_selections=10,
         )
     with c2:
-        horizon_label = st.selectbox("Horizon", ["1 month (21 days)", "3 months (63 days)", "1 year (252 days)"])
-        horizon_map   = {"1 month (21 days)": 21, "3 months (63 days)": 63, "1 year (252 days)": 252}
-        horizon       = horizon_map[horizon_label]
+        horizon = MC_HORIZONS[st.selectbox("Horizon", list(MC_HORIZONS))]
     with c3:
         n_paths = st.selectbox("Simulated paths", [5_000, 10_000, 50_000], index=1)
     with c4:
-        initial_value = st.number_input("Initial portfolio ($)", value=10_000, step=1_000)
+        initial_value = float(st.number_input("Initial portfolio ($)", value=10_000, step=1_000))
 
+    # Early exits use `return`, not st.stop(): stopping here would also blank
+    # the Model Validation tab and the footer, which render after this tab.
     if not chosen:
         st.info("Select at least one ticker above to run the simulation.")
-        st.stop()
+        return
 
     # ── Fetch & simulate ──────────────────────────────────────────────────────
     with st.spinner(f"Fetching 1 year of price history for {', '.join(chosen)} …"):
         prices = fetch_prices(tuple(chosen), period="1y")
 
-    # Keep only tickers that returned data
-    prices = prices[[t for t in chosen if t in prices.columns]].dropna()
+    prices = prices[[t for t in chosen if t in prices.columns]]
 
     if prices.shape[1] == 0:
         st.error("Could not fetch price data for any selected ticker (yfinance).")
-        st.stop()
+        return
 
     not_fetched = [t for t in chosen if t not in prices.columns]
     if not_fetched:
@@ -500,45 +483,45 @@ with tab_mc:
 
     if len(valid_tickers) == 0:
         st.error("Could not obtain usable price data for any selected ticker.")
-        st.stop()
+        return
 
     if log_ret.shape[0] < 30:
         st.error(
             f"Only {log_ret.shape[0]} overlapping days of history, too few to "
             "estimate risk reliably. Try more established tickers or fewer names."
         )
-        st.stop()
+        return
 
     with st.spinner(f"Running {n_paths:,} Monte Carlo paths …"):
         growth = simulate_growth(log_ret, horizon, n_paths)
-        port_values = float(initial_value) * growth
+        port_values = initial_value * growth
 
     # ── Risk metrics ──────────────────────────────────────────────────────────
-    final_values  = port_values[:, -1]
+    final_values = port_values[:, -1]
     final_returns = (final_values - initial_value) / initial_value
 
-    var_95  = float(np.percentile(final_values, 5))
+    var_95 = float(np.percentile(final_values, 5))
     cvar_95 = float(final_values[final_values <= var_95].mean())
-    p_loss  = float((final_values < initial_value).mean())
+    p_loss = float((final_values < initial_value).mean())
     med_ret = float(np.median(final_returns) * 100)
     mean_ret = float(np.mean(final_returns) * 100)
 
     # Dollar losses vs the starting value, floored at 0: over long horizons a
     # positive drift can lift even the 5th-percentile outcome above the initial
     # value, which is a gain, not a "negative loss".
-    var_loss  = max(initial_value - var_95, 0.0)
+    var_loss = max(initial_value - var_95, 0.0)
     cvar_loss = max(initial_value - cvar_95, 0.0)
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("VaR (95%)",  f"${var_loss:,.0f}",
+    m1.metric("VaR (95%)", f"${var_loss:,.0f}",
               help="Loss not exceeded in 95% of scenarios: you lose less than "
                    "this (vs. the starting value) 95% of the time")
     m2.metric("CVaR (95%)", f"${cvar_loss:,.0f}",
               help="Average loss in the worst 5% of scenarios (Expected Shortfall)")
-    m3.metric("P(loss)",    f"{p_loss*100:.1f}%",
+    m3.metric("P(loss)", f"{p_loss*100:.1f}%",
               help="Fraction of simulated paths that end below the initial investment")
     m4.metric("Median return", f"{med_ret:+.1f}%")
-    m5.metric("Mean return",   f"{mean_ret:+.1f}%")
+    m5.metric("Mean return", f"{mean_ret:+.1f}%")
 
     st.divider()
 
@@ -551,11 +534,9 @@ with tab_mc:
 
     # ── Fan chart ─────────────────────────────────────────────────────────────
     t_axis = list(range(horizon + 1))
-    pcts   = np.percentile(port_values, [5, 25, 50, 75, 95], axis=0)
+    pcts = np.percentile(port_values, [5, 25, 50, 75, 95], axis=0)
 
     fig_fan = go.Figure()
-
-    # Shaded bands
     fig_fan.add_trace(go.Scatter(
         x=t_axis + t_axis[::-1],
         y=pcts[4].tolist() + pcts[0].tolist()[::-1],
@@ -568,18 +549,13 @@ with tab_mc:
         fill="toself", fillcolor="rgba(99,102,241,0.28)",
         line=dict(width=0), name="25th–75th pct", showlegend=True,
     ))
-
-    # Median line
     fig_fan.add_trace(go.Scatter(
         x=t_axis, y=pcts[2], name="Median",
-        line=dict(color="#6366F1", width=2.5),
+        line=dict(color=ACCENT, width=2.5),
     ))
-
-    # Initial value reference
     fig_fan.add_hline(y=initial_value, line_dash="dot",
                       line_color="gray", opacity=0.6,
                       annotation_text="Initial value", annotation_position="right")
-
     fig_fan.update_layout(
         title=f"Simulated portfolio paths, {horizon}-day horizon  "
               f"({n_paths:,} paths, equal-weighted: {', '.join(valid_tickers)})",
@@ -595,7 +571,7 @@ with tab_mc:
     fig_hist = go.Figure()
     fig_hist.add_trace(go.Histogram(
         x=final_values, nbinsx=80,
-        marker_color="#6366F1", opacity=0.75, name="Final value",
+        marker_color=ACCENT, opacity=0.75, name="Final value",
     ))
     fig_hist.add_vline(x=initial_value, line_dash="dot", line_color="gray",
                        annotation_text="Initial", annotation_position="top right")
@@ -615,17 +591,18 @@ with tab_mc:
 
     # ── Individual asset stats ─────────────────────────────────────────────────
     with st.expander("Individual asset statistics (from historical data)"):
+        ann_ret = log_ret.mean() * 252
+        ann_vol = log_ret.std() * np.sqrt(252)
         asset_stats = pd.DataFrame({
-            "Ticker":        valid_tickers,
-            "Ann. Return (%)": (log_ret.mean() * 252 * 100).round(2).values,
-            "Ann. Vol (%)":    (log_ret.std() * np.sqrt(252) * 100).round(2).values,
-            "Sharpe (rf=0)":   ((log_ret.mean() * 252) / (log_ret.std() * np.sqrt(252))).round(3).values,
+            "Ticker": valid_tickers,
+            "Ann. Return (%)": (ann_ret * 100).round(2).values,
+            "Ann. Vol (%)": (ann_vol * 100).round(2).values,
+            "Sharpe (rf=0)": (ann_ret / ann_vol).round(3).values,
         })
         st.dataframe(asset_stats, width="stretch", hide_index=True)
 
-        corr_df = log_ret.corr().round(3)
         st.markdown("**Return correlation matrix (1-year daily)**")
-        st.dataframe(corr_df, width="stretch")
+        st.dataframe(log_ret.corr().round(3), width="stretch")
 
     with st.expander("Methodology"):
         st.markdown(
@@ -675,216 +652,224 @@ with tab_mc:
             """
         )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 3: MODEL VALIDATION
-# ─────────────────────────────────────────────────────────────────────────────
 
-_VALIDATION_DIR = os.path.join(os.path.dirname(__file__), "data")
-VALIDATION_METRICS_PATH = os.path.join(_VALIDATION_DIR, "validation_metrics.json")
-VALIDATION_DAILY_PATH = os.path.join(_VALIDATION_DIR, "validation_daily.csv")
-VALIDATION_CALIB_PATH = os.path.join(_VALIDATION_DIR, "validation_calibration.csv")
-
-
-@st.cache_data(ttl=3600)
-def load_validation_artefacts():
-    with open(VALIDATION_METRICS_PATH) as f:
-        metrics = json.load(f)
-    daily = pd.read_csv(VALIDATION_DAILY_PATH, parse_dates=["date"])
-    calib = pd.read_csv(VALIDATION_CALIB_PATH)
-    return metrics, daily, calib
-
-
-with tab_validation:
+def render_validation() -> None:
     st.subheader("Walk-Forward Validation")
 
-    _artefacts_present = all(
+    artefacts_present = all(
         os.path.exists(p)
         for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIB_PATH)
     )
-    if not _artefacts_present:
+    if not artefacts_present:
         st.info(
             "No validation artefacts found. Run `python evaluate.py` locally to "
             "generate `data/validation_metrics.json` and the daily/calibration "
             "CSVs, then commit them."
         )
-    else:
-        metrics, val_daily, val_calib = load_validation_artefacts()
-        pooled = metrics["results"]["pooled"]
-        overall = metrics["results"]["overall_daily"]
-        snapshot = metrics["data_snapshot"]
-        scheme = metrics["validation_scheme"]
+        return
 
+    metrics, val_daily, val_calib = load_validation_artefacts()
+    pooled = metrics["results"]["pooled"]
+    overall = metrics["results"]["overall_daily"]
+    snapshot = metrics["data_snapshot"]
+    scheme = metrics["validation_scheme"]
+
+    st.markdown(
+        "Out-of-sample performance of the XGBoost classifier, measured the "
+        "way the screener is actually used: each test day, rank the whole "
+        "S&P 500 cross-section and take the top 15. Expanding-window "
+        "walk-forward folds with calendar-year test blocks; training rows "
+        "whose 5-day label windows would overlap a test period are purged."
+    )
+
+    v1, v2, v3, v4, v5 = st.columns(5)
+    v1.metric(
+        "ROC AUC (pooled)", f"{pooled['roc_auc']:.3f}",
+        help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance.",
+    )
+    v2.metric(
+        "Brier score", f"{pooled['brier']:.3f}",
+        help="Mean squared error of the predicted probabilities; lower is better.",
+    )
+    v3.metric(
+        "Precision@15 (daily mean)",
+        f"{overall['precision_top15_mean'] * 100:.1f}%",
+        delta=f"{overall['excess_precision_top15_mean'] * 100:+.1f} pts vs base rate",
+        help="Fraction of each day's top-15 picks whose take-profit barrier "
+             "was hit first, averaged over test days.",
+    )
+    v4.metric(
+        "Daily base rate", f"{overall['base_rate_daily_mean'] * 100:.1f}%",
+        help="Average fraction of all stocks that hit the take-profit barrier first on a given test day.",
+    )
+    v5.metric(
+        "Top-decile lift", f"{overall['top_decile_lift_mean']:.2f}x",
+        help="Hit rate of the top decile by predicted probability relative to the day's base rate.",
+    )
+    ci_lo, ci_hi = overall["excess_precision_top15_ci95"]
+    st.caption(
+        f"Data snapshot: {snapshot['last_price_date']} "
+        f"({snapshot['n_tickers']} tickers) · "
+        f"generated {metrics['generated_at_utc']} · "
+        f"top-15 beats the base rate on "
+        f"{overall['frac_days_top15_beats_base'] * 100:.0f}% of "
+        f"{overall['n_days']} test days · "
+        f"95% CI on the mean excess: [{ci_lo * 100:+.1f}, {ci_hi * 100:+.1f}] pts"
+    )
+
+    # The caveats ship inside the same artefact as the numbers, so they
+    # are always rendered alongside them.
+    st.warning(
+        "**Read before quoting these numbers**\n\n"
+        + "\n".join(f"- {c}" for c in metrics["caveats"])
+    )
+
+    st.divider()
+
+    folds_df = pd.DataFrame(scheme["folds"])[["fold_id", "test_start", "partial"]]
+    perf_df = pd.DataFrame(metrics["results"]["per_fold"])
+    fold_table = folds_df.merge(perf_df, on="fold_id")
+    fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(
+        fold_table["partial"], " (partial)", ""
+    )
+    year_label = dict(zip(fold_table["fold_id"], fold_table["Test year"], strict=True))
+
+    st.subheader("Per-Fold Results")
+    display = pd.DataFrame({
+        "Test year": fold_table["Test year"],
+        "Test rows": fold_table["n_test_rows"],
+        "ROC AUC": fold_table["roc_auc"].round(3),
+        "Brier": fold_table["brier"].round(3),
+        "Base rate": (fold_table["base_rate"] * 100).round(1),
+        "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
+        "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
+        "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
+    })
+    st.dataframe(display, width="stretch", hide_index=True)
+
+    col_box, col_rel = st.columns(2)
+
+    with col_box:
+        box_df = val_daily.copy()
+        box_df["Test year"] = box_df["fold_id"].map(year_label)
+        box_df = box_df.melt(
+            id_vars=["Test year"],
+            value_vars=["precision_top15", "base_rate"],
+            var_name="Metric",
+            value_name="Value",
+        )
+        box_df["Metric"] = box_df["Metric"].map(
+            {"precision_top15": "Precision@15", "base_rate": "Base rate"}
+        )
+        fig_box = px.box(
+            box_df, x="Test year", y="Value", color="Metric",
+            title="Daily precision@15 vs base rate, by test year",
+            color_discrete_sequence=[ACCENT, MUTED],
+        )
+        fig_box.update_layout(
+            yaxis_title="Daily hit rate",
+            legend=dict(orientation="h", y=1.12),
+            margin=dict(l=0, r=0, t=60, b=0),
+        )
+        st.plotly_chart(style_plotly(fig_box, height=400), width="stretch")
+
+    with col_rel:
+        pooled_calib = val_calib[val_calib["fold_id"].astype(str) == "pooled"]
+        lo = float(pooled_calib["mean_predicted"].min())
+        hi = float(pooled_calib["mean_predicted"].max())
+        fig_rel = go.Figure()
+        fig_rel.add_trace(go.Scatter(
+            x=[lo, hi], y=[lo, hi], mode="lines", name="Perfect calibration",
+            line=dict(color="gray", dash="dash"),
+        ))
+        fig_rel.add_trace(go.Scatter(
+            x=pooled_calib["mean_predicted"], y=pooled_calib["observed_rate"],
+            mode="lines+markers", name="Model (pooled)",
+            line=dict(color=ACCENT, width=2.5), marker_size=8,
+            customdata=pooled_calib["count"],
+            hovertemplate="Predicted %{x:.3f}<br>Observed %{y:.3f}<br>n=%{customdata}<extra></extra>",
+        ))
+        fig_rel.update_layout(
+            title="Reliability curve (quantile bins, pooled test rows)",
+            xaxis_title="Mean predicted probability",
+            yaxis_title="Observed positive rate",
+            legend=dict(orientation="h", y=1.12),
+            margin=dict(l=0, r=0, t=60, b=0),
+        )
+        st.plotly_chart(style_plotly(fig_rel, height=400), width="stretch")
+
+    with st.expander("How this validation works"):
         st.markdown(
-            "Out-of-sample performance of the XGBoost classifier, measured the "
-            "way the screener is actually used: each test day, rank the whole "
-            "S&P 500 cross-section and take the top 15. Expanding-window "
-            "walk-forward folds with calendar-year test blocks; training rows "
-            "whose 5-day label windows would overlap a test period are purged."
+            f"""
+            **Protocol.** Expanding-window walk-forward validation with
+            calendar-year test blocks, starting in
+            {scheme['first_test_year']}. For each fold, the model is
+            retrained from scratch on all data up to the fold's training
+            cutoff using the production training code and hyperparameters,
+            then scores every day in the test year.
+
+            **Leakage control.** The triple-barrier label for day *t* looks
+            at the next {scheme['purge_trading_days']} trading days, so the
+            last {scheme['purge_trading_days']} trading days before each
+            test block are removed from training: their labels would peek
+            into the test period. All features are strictly backward-looking
+            (rolling windows, exponential averages, lags), which is enforced
+            by an automated causality check that rebuilds features from
+            truncated data and asserts they are unchanged.
+
+            **Metrics.** Precision@15 mirrors deployment: rank the day's
+            cross-section by predicted probability, take the top 15, and
+            measure how many hit the take-profit barrier first. The base
+            rate is the same quantity for the whole cross-section, so the
+            excess is the value added by the ranking. ROC AUC and the
+            Brier score are computed over all test rows; the reliability
+            curve shows whether predicted probabilities match observed
+            frequencies. Confidence intervals use a moving-block bootstrap
+            (block length {scheme['purge_trading_days']}) because
+            overlapping label windows make consecutive days dependent.
+
+            The full implementation is in `evaluate.py`; every number on
+            this page is read from `data/validation_metrics.json`, which
+            records the data snapshot, fold boundaries, library versions
+            and git commit that produced it.
+            """
         )
 
-        v1, v2, v3, v4, v5 = st.columns(5)
-        v1.metric(
-            "ROC AUC (pooled)", f"{pooled['roc_auc']:.3f}",
-            help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance.",
-        )
-        v2.metric(
-            "Brier score", f"{pooled['brier']:.3f}",
-            help="Mean squared error of the predicted probabilities; lower is better.",
-        )
-        v3.metric(
-            "Precision@15 (daily mean)",
-            f"{overall['precision_top15_mean'] * 100:.1f}%",
-            delta=f"{overall['excess_precision_top15_mean'] * 100:+.1f} pts vs base rate",
-            help="Fraction of each day's top-15 picks whose take-profit barrier "
-                 "was hit first, averaged over test days.",
-        )
-        v4.metric(
-            "Daily base rate", f"{overall['base_rate_daily_mean'] * 100:.1f}%",
-            help="Average fraction of all stocks that hit the take-profit barrier first on a given test day.",
-        )
-        v5.metric(
-            "Top-decile lift", f"{overall['top_decile_lift_mean']:.2f}x",
-            help="Hit rate of the top decile by predicted probability relative to the day's base rate.",
-        )
-        st.caption(
-            f"Data snapshot: {snapshot['last_price_date']} "
-            f"({snapshot['n_tickers']} tickers) · "
-            f"generated {metrics['generated_at_utc']} · "
-            f"top-15 beats the base rate on "
-            f"{overall['frac_days_top15_beats_base'] * 100:.0f}% of "
-            f"{overall['n_days']} test days · "
-            f"95% CI on the mean excess: "
-            f"[{overall['excess_precision_top15_ci95'][0] * 100:+.1f}, "
-            f"{overall['excess_precision_top15_ci95'][1] * 100:+.1f}] pts"
-        )
 
-        # The caveats ship inside the same artefact as the numbers, so they
-        # are always rendered alongside them.
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main() -> None:
+    st.set_page_config(page_title="S&P 500 AI Screener", page_icon="📈", layout="wide")
+    render_header()
+
+    if not os.path.exists(SIGNALS_PATH):
         st.warning(
-            "**Read before quoting these numbers**\n\n"
-            + "\n".join(f"- {c}" for c in metrics["caveats"])
+            "No signals file found at `data/latest_signals.csv`. "
+            "Run `python generate_signals.py` locally to generate it, "
+            "then commit the file to the repository."
         )
+        st.stop()
 
-        st.divider()
+    df = load_signals(SIGNALS_PATH)
 
-        folds_df = pd.DataFrame(scheme["folds"])[["fold_id", "test_start", "partial"]]
-        perf_df = pd.DataFrame(metrics["results"]["per_fold"])
-        fold_table = folds_df.merge(perf_df, on="fold_id")
-        fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(
-            fold_table["partial"], " (partial)", ""
-        )
+    if "generated_at" in df.columns:
+        st.caption(f"Last updated: **{df['generated_at'].iloc[0]} UTC**")
+    else:
+        st.caption("Last updated: timestamp not available")
 
-        year_label = dict(zip(fold_table["fold_id"], fold_table["Test year"], strict=True))
+    filtered = sidebar_filters(df)
 
-        st.subheader("Per-Fold Results")
-        display = pd.DataFrame({
-            "Test year": fold_table["Test year"],
-            "Test rows": fold_table["n_test_rows"],
-            "ROC AUC": fold_table["roc_auc"].round(3),
-            "Brier": fold_table["brier"].round(3),
-            "Base rate": (fold_table["base_rate"] * 100).round(1),
-            "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
-            "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
-            "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
-        })
-        st.dataframe(display, width="stretch", hide_index=True)
+    tab_screener, tab_mc, tab_validation = st.tabs(["Screener", "Monte Carlo Risk", "Model Validation"])
+    with tab_screener:
+        render_screener(df, filtered)
+    with tab_mc:
+        render_monte_carlo(df)
+    with tab_validation:
+        render_validation()
 
-        col_box, col_rel = st.columns(2)
+    render_footer()
 
-        with col_box:
-            box_df = val_daily.copy()
-            box_df["Test year"] = box_df["fold_id"].map(year_label)
-            box_df = box_df.melt(
-                id_vars=["Test year"],
-                value_vars=["precision_top15", "base_rate"],
-                var_name="Metric",
-                value_name="Value",
-            )
-            box_df["Metric"] = box_df["Metric"].map(
-                {"precision_top15": "Precision@15", "base_rate": "Base rate"}
-            )
-            fig_box = px.box(
-                box_df, x="Test year", y="Value", color="Metric",
-                title="Daily precision@15 vs base rate, by test year",
-                color_discrete_sequence=["#6366F1", "#8B95A7"],
-            )
-            fig_box.update_layout(
-                yaxis_title="Daily hit rate",
-                legend=dict(orientation="h", y=1.12),
-                margin=dict(l=0, r=0, t=60, b=0),
-            )
-            st.plotly_chart(style_plotly(fig_box, height=400), width="stretch")
 
-        with col_rel:
-            pooled_calib = val_calib[val_calib["fold_id"].astype(str) == "pooled"]
-            fig_rel = go.Figure()
-            lo = float(pooled_calib["mean_predicted"].min())
-            hi = float(pooled_calib["mean_predicted"].max())
-            fig_rel.add_trace(go.Scatter(
-                x=[lo, hi], y=[lo, hi], mode="lines", name="Perfect calibration",
-                line=dict(color="gray", dash="dash"),
-            ))
-            fig_rel.add_trace(go.Scatter(
-                x=pooled_calib["mean_predicted"], y=pooled_calib["observed_rate"],
-                mode="lines+markers", name="Model (pooled)",
-                line=dict(color="#6366F1", width=2.5), marker_size=8,
-                customdata=pooled_calib["count"],
-                hovertemplate="Predicted %{x:.3f}<br>Observed %{y:.3f}<br>n=%{customdata}<extra></extra>",
-            ))
-            fig_rel.update_layout(
-                title="Reliability curve (quantile bins, pooled test rows)",
-                xaxis_title="Mean predicted probability",
-                yaxis_title="Observed positive rate",
-                legend=dict(orientation="h", y=1.12),
-                margin=dict(l=0, r=0, t=60, b=0),
-            )
-            st.plotly_chart(style_plotly(fig_rel, height=400), width="stretch")
-
-        with st.expander("How this validation works"):
-            st.markdown(
-                f"""
-                **Protocol.** Expanding-window walk-forward validation with
-                calendar-year test blocks, starting in
-                {scheme['first_test_year']}. For each fold, the model is
-                retrained from scratch on all data up to the fold's training
-                cutoff using the production training code and hyperparameters,
-                then scores every day in the test year.
-
-                **Leakage control.** The triple-barrier label for day *t* looks
-                at the next {scheme['purge_trading_days']} trading days, so the
-                last {scheme['purge_trading_days']} trading days before each
-                test block are removed from training: their labels would peek
-                into the test period. All features are strictly backward-looking
-                (rolling windows, exponential averages, lags), which is enforced
-                by an automated causality check that rebuilds features from
-                truncated data and asserts they are unchanged.
-
-                **Metrics.** Precision@15 mirrors deployment: rank the day's
-                cross-section by predicted probability, take the top 15, and
-                measure how many hit the take-profit barrier first. The base
-                rate is the same quantity for the whole cross-section, so the
-                excess is the value added by the ranking. ROC AUC and the
-                Brier score are computed over all test rows; the reliability
-                curve shows whether predicted probabilities match observed
-                frequencies. Confidence intervals use a moving-block bootstrap
-                (block length {scheme['purge_trading_days']}) because
-                overlapping label windows make consecutive days dependent.
-
-                The full implementation is in `evaluate.py`; every number on
-                this page is read from `data/validation_metrics.json`, which
-                records the data snapshot, fold boundaries, library versions
-                and git commit that produced it.
-                """
-            )
-
-# =============================================================================
-# FOOTER
-# =============================================================================
-
-st.divider()
-st.markdown(
-    '<div class="footer">Built by <b>Ethan Buckley</b> &nbsp;·&nbsp; '
-    '<a href="https://github.com/ethanbuckley" target="_blank">GitHub</a> &nbsp;·&nbsp; '
-    '<a href="https://www.linkedin.com/in/ethan-buckley/" target="_blank">LinkedIn</a></div>',
-    unsafe_allow_html=True,
-)
+main()

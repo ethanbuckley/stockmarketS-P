@@ -29,14 +29,10 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+from numpy.lib.stride_tricks import sliding_window_view
 
 if TYPE_CHECKING:
     from xgboost import XGBClassifier
-
-# Suppress noisy third-party logs so only our own output appears
-warnings.filterwarnings("ignore")
-logging.getLogger("transformers").setLevel(logging.ERROR)
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +66,21 @@ NEWS_ARTICLES_PER_TICKER = 10
 
 # Macro benchmark ETFs and indices used as market-context features
 MACRO_TICKERS = ["SPY", "QQQ", "SMH", "^VIX", "^TNX"]
+
+# The feature set fed to XGBoost; each feature is listed explicitly for clarity
+FEATURE_COLUMNS = [
+    "Return", "RSI", "MACD", "BB_Position",
+    "Price_to_VWAP", "ATR_Ratio", "Volume_Surge", "Day_Of_Week",
+    "SPY_Return", "QQQ_Return", "SMH_Return", "VIX_Change", "TNX_Change",
+    "Rel_SPY", "Rel_QQQ", "Rel_SMH",
+    "Return_Lag_1", "Return_Lag_2", "Return_Lag_3",
+    "QQQ_Lag_1", "QQQ_Lag_2", "QQQ_Lag_3",
+]
+
+# Interpretation thresholds (percent confidence) used by the console output
+# and the dashboard when flagging long/short confluence with sentiment.
+LONG_CONFIDENCE_PCT = 55.0
+SHORT_CONFIDENCE_PCT = 45.0
 
 
 # =============================================================================
@@ -128,13 +139,23 @@ def download_market_data(tickers: list[str], start: str = DATA_START_DATE) -> pd
     if data is None or data.empty:
         raise RuntimeError("yfinance returned no market data.")
 
-    missing = [t for t in tickers if t not in data["Close"].columns or data["Close"][t].isna().all()]
+    missing = [t for t in tickers if t not in tickers_with_data(data)]
     if missing:
         shown = ", ".join(missing[:10]) + (", ..." if len(missing) > 10 else "")
         logger.warning("No price data for %d ticker(s): %s", len(missing), shown)
 
-    data = data.ffill()
-    return data
+    # Downstream code joins per-ticker frames against the macro series on this
+    # index, so normalise it to tz-naive once here rather than per ticker.
+    if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
+        data.index = data.index.tz_localize(None)
+
+    return data.ffill()
+
+
+def tickers_with_data(raw_data: pd.DataFrame) -> list[str]:
+    """Tickers in a yfinance panel that returned at least one closing price."""
+    close = raw_data["Close"]
+    return [t for t in close.columns if close[t].notna().any()]
 
 
 # =============================================================================
@@ -156,8 +177,6 @@ def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     Implementation uses sliding_window_view for a fully vectorized O(n*W) NumPy
     pass instead of nested Python loops, making it ~100-200x faster on long series.
     """
-    from numpy.lib.stride_tricks import sliding_window_view
-
     W = FORWARD_WINDOW_DAYS
     closes = df["Close"].to_numpy(dtype=float)
     highs  = df["High"].to_numpy(dtype=float)
@@ -285,8 +304,6 @@ def process_ticker(ticker: str, raw_data: pd.DataFrame) -> pd.DataFrame:
     Returns a DataFrame with OHLCV data, labels, and all features.
     """
     df = pd.DataFrame(index=raw_data.index)
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-
     df["Close"] = raw_data["Close"][ticker]
     df["High"] = raw_data["High"][ticker]
     df["Low"] = raw_data["Low"][ticker]
@@ -324,7 +341,8 @@ def build_master_dataframe(
     raw_data = download_market_data(tickers, start=start)
 
     # Tickers that returned no data at all cannot be processed
-    available = [t for t in tickers if t in raw_data["Close"].columns]
+    with_data = set(tickers_with_data(raw_data))
+    available = [t for t in tickers if t in with_data]
 
     print("Engineering features for all tickers...")
     master_df = pd.concat([process_ticker(t, raw_data) for t in available])
@@ -360,17 +378,6 @@ def build_dataset(tickers_limit: int | None = None) -> tuple[pd.DataFrame, pd.Da
 # STEP 3: MODEL TRAINING
 # =============================================================================
 
-# The feature set fed to XGBoost; each feature is listed explicitly for clarity
-FEATURE_COLUMNS = [
-    "Return", "RSI", "MACD", "BB_Position",
-    "Price_to_VWAP", "ATR_Ratio", "Volume_Surge", "Day_Of_Week",
-    "SPY_Return", "QQQ_Return", "SMH_Return", "VIX_Change", "TNX_Change",
-    "Rel_SPY", "Rel_QQQ", "Rel_SMH",
-    "Return_Lag_1", "Return_Lag_2", "Return_Lag_3",
-    "QQQ_Lag_1", "QQQ_Lag_2", "QQQ_Lag_3",
-]
-
-
 def train_model(train_df: pd.DataFrame) -> XGBClassifier:
     """
     Trains a single XGBoost classifier across all S&P 500 stocks.
@@ -389,7 +396,7 @@ def train_model(train_df: pd.DataFrame) -> XGBClassifier:
     return model
 
 
-def score_and_rank(model, latest_df: pd.DataFrame) -> pd.DataFrame:
+def score_and_rank(model: XGBClassifier, latest_df: pd.DataFrame) -> pd.DataFrame:
     """
     Scores the latest row per ticker and returns the focus list for sentiment
     analysis: the TOP_N_CANDIDATES highest and BOTTOM_N_CANDIDATES lowest by
@@ -400,7 +407,8 @@ def score_and_rank(model, latest_df: pd.DataFrame) -> pd.DataFrame:
 
     top_candidates = latest_df.nlargest(TOP_N_CANDIDATES, "Probability")
     bottom_candidates = latest_df.nsmallest(BOTTOM_N_CANDIDATES, "Probability")
-    return pd.concat([top_candidates, bottom_candidates]).copy()
+    # On a tiny universe (--tickers-limit) the two ends can overlap.
+    return pd.concat([top_candidates, bottom_candidates]).drop_duplicates(subset="Ticker").copy()
 
 
 # =============================================================================
@@ -413,7 +421,10 @@ def load_sentiment_model():
     Returns a HuggingFace sentiment-analysis pipeline.
     """
     # Imported lazily: transformers (and its torch dependency) are only
-    # needed when sentiment is actually requested.
+    # needed when sentiment is actually requested. Quieten their logging so
+    # only the screener's own progress output appears.
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    logging.getLogger("transformers").setLevel(logging.ERROR)
     from transformers import pipeline
 
     return pipeline("sentiment-analysis", model="ProsusAI/finbert")
@@ -552,8 +563,8 @@ def print_results(leaderboard: pd.DataFrame) -> None:
 
     print(f"\n{separator}")
     print("Interpretation guide:")
-    print("  LONG:  Confidence > 55%  AND  Sentiment > 0  ->  bullish confluence")
-    print("  SHORT: Confidence < 45%  AND  Sentiment < 0  ->  bearish confluence")
+    print(f"  LONG:  Confidence > {LONG_CONFIDENCE_PCT:.0f}%  AND  Sentiment > 0  ->  bullish confluence")
+    print(f"  SHORT: Confidence < {SHORT_CONFIDENCE_PCT:.0f}%  AND  Sentiment < 0  ->  bearish confluence")
     print(separator)
 
 
@@ -576,7 +587,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def quiet_third_party_warnings() -> None:
+    """Hide yfinance/pandas FutureWarnings during a console run. Call from an
+    entry point, never at import time, so tests and library users still see them."""
+    warnings.filterwarnings("ignore")
+
+
 def main() -> None:
+    quiet_third_party_warnings()
     args = parse_args()
     leaderboard = run_pipeline(tickers_limit=args.tickers_limit, skip_sentiment=args.skip_sentiment)
     print_results(leaderboard)

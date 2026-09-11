@@ -18,13 +18,12 @@ A blank Sentiment_Score means no news was available for that ticker at
 generation time (or the lookup failed); it does not mean neutral sentiment.
 """
 
-import argparse
 import datetime
 import os
 
 import pandas as pd
 
-from screener import print_results, run_pipeline
+from screener import parse_args, print_results, quiet_third_party_warnings, run_pipeline
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "data")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "latest_signals.csv")
@@ -41,20 +40,14 @@ def save_signals(leaderboard: pd.DataFrame) -> None:
     print(f"\nSignals written to {OUTPUT_PATH}  ({len(leaderboard)} rows)")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Run the screening pipeline and write data/latest_signals.csv."
-    )
-    parser.add_argument(
-        "--tickers-limit", type=int, default=None, metavar="N",
-        help="only process the first N tickers (fast smoke run; not for real signals)",
-    )
-    parser.add_argument(
-        "--skip-sentiment", action="store_true",
-        help="skip the FinBERT sentiment stage; Sentiment_Score is left blank",
-    )
-    args = parser.parse_args()
-
+def main() -> None:
+    quiet_third_party_warnings()
+    # Same flags as `python screener.py`; the only difference is the CSV write.
+    args = parse_args()
     leaderboard = run_pipeline(tickers_limit=args.tickers_limit, skip_sentiment=args.skip_sentiment)
     print_results(leaderboard)
     save_signals(leaderboard)
+
+
+if __name__ == "__main__":
+    main()

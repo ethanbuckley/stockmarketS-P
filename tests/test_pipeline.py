@@ -55,6 +55,20 @@ def test_master_dataframe_is_unfiltered_and_carries_metadata(stubbed_market):
     assert "download_timestamp_utc" in metadata
 
 
+def test_tickers_with_no_prices_are_excluded(monkeypatch):
+    # A symbol Yahoo knows but returns no rows for must not reach the panel
+    # or the metadata; it would otherwise inflate n_tickers in the artefacts.
+    panel = synthetic_panel()
+    for field in ("Close", "High", "Low", "Volume"):
+        panel[(field, "GHOST")] = np.nan
+    monkeypatch.setattr(screener, "fetch_sp500_tickers", lambda: [*EQUITIES, "GHOST"])
+    monkeypatch.setattr(screener, "download_market_data", lambda tickers, start=None: panel)
+
+    master_df, metadata = build_master_dataframe()
+    assert metadata["tickers"] == EQUITIES
+    assert "GHOST" not in set(master_df["Ticker"])
+
+
 def test_split_invariants(stubbed_market):
     train_df, latest_df = build_dataset()
 
