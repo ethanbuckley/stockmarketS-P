@@ -17,8 +17,11 @@ import streamlit as st
 # config.py is dependency-free, so importing it never pulls xgboost/torch
 # into the deployed app.
 from config import (
+    BACKTEST_COST_BPS,
+    BACKTEST_HOLD_DAYS,
     BOTTOM_N_CANDIDATES,
     CANDIDATE_PRICES_PATH,
+    DATA_DIR,
     LONG_POOL,
     SHORT_POOL,
     SIGNALS_PATH,
@@ -38,6 +41,8 @@ POOL_LABEL = {
     LONG_POOL: f"Long pool (top {TOP_N_CANDIDATES})",
     SHORT_POOL: f"Short pool (bottom {BOTTOM_N_CANDIDATES})",
 }
+
+BACKTEST_PATH = os.path.join(DATA_DIR, "backtest_daily.csv")
 
 MC_HORIZONS = {"1 month (21 days)": 21, "3 months (63 days)": 63, "1 year (252 days)": 252}
 
@@ -149,7 +154,8 @@ def load_validation_artefacts():
         metrics = json.load(f)
     daily = pd.read_csv(VALIDATION_DAILY_PATH, parse_dates=["date"])
     calib = pd.read_csv(VALIDATION_CALIBRATION_PATH)
-    return metrics, daily, calib
+    backtest = pd.read_csv(BACKTEST_PATH, parse_dates=["date"]) if os.path.exists(BACKTEST_PATH) else pd.DataFrame()
+    return metrics, daily, calib, backtest
 
 
 # =============================================================================
@@ -722,7 +728,7 @@ def render_validation() -> None:
         )
         return
 
-    metrics, val_daily, val_calib = load_validation_artefacts()
+    metrics, val_daily, val_calib, val_backtest = load_validation_artefacts()
     pooled = metrics["results"]["pooled"]
     overall = metrics["results"]["overall_daily"]
     snapshot = metrics["data_snapshot"]
@@ -736,11 +742,18 @@ def render_validation() -> None:
         "whose 5-day label windows would overlap a test period are purged."
     )
 
-    v1, v2, v3, v4, v5 = st.columns(5)
+    v1, v2, v3, v4, v5, v6 = st.columns(6)
     v1.metric(
         "ROC AUC (pooled)",
         f"{pooled['roc_auc']:.3f}",
-        help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance.",
+        help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance. "
+        "Includes the between-day 'regime' effect; see the per-day AUC for pure ranking skill.",
+    )
+    v6.metric(
+        "Per-day AUC (mean)",
+        f"{overall.get('daily_auc_mean', float('nan')):.3f}",
+        help="ROC AUC computed within each test day's cross-section, then averaged: the ranking skill a "
+        "screener can actually use. A model that only knew which days were good would score 0.5 here.",
     )
     v2.metric(
         "Brier score",
@@ -764,9 +777,16 @@ def render_validation() -> None:
         help="Hit rate of the top decile by predicted probability relative to the day's base rate.",
     )
     ci_lo, ci_hi = overall["excess_precision_top15_ci95"]
+    universe = snapshot.get("universe", {})
+    universe_note = (
+        f"{universe['n_current']} current members + {universe['n_removed_with_price_data']} of "
+        f"{universe['n_removed_since_start']} former members"
+        if universe.get("type") == "point_in_time"
+        else f"{snapshot['n_tickers']} tickers"
+    )
     st.caption(
         f"Data snapshot: {snapshot['last_price_date']} "
-        f"({snapshot['n_tickers']} tickers) · "
+        f"({universe_note}) · "
         f"generated {metrics['generated_at_utc']} · "
         f"top-15 beats the base rate on "
         f"{overall['frac_days_top15_beats_base'] * 100:.0f}% of "
@@ -774,28 +794,44 @@ def render_validation() -> None:
         f"95% CI on the mean excess: [{ci_lo * 100:+.1f}, {ci_hi * 100:+.1f}] pts"
     )
 
+    atr = metrics["results"].get("baselines", {}).get("atr_rank")
+    if atr:
+        st.caption(
+            f"Volatility-only baseline (rank each day by ATR ratio, no model): per-day AUC "
+            f"{atr['daily_auc_mean']:.3f}, precision@15 {atr['precision_top15_mean'] * 100:.1f}% "
+            f"({atr['excess_precision_top15_mean'] * 100:+.1f} pts vs base). The model's margin over this "
+            f"is its value beyond 'buy the most volatile names'."
+        )
+
     # The caveats ship inside the same artefact as the numbers, so they
     # are always rendered alongside them.
     st.warning("**Read before quoting these numbers**\n\n" + "\n".join(f"- {c}" for c in metrics["caveats"]))
 
     st.divider()
 
-    folds_df = pd.DataFrame(scheme["folds"])[["fold_id", "test_start", "partial"]]
+    fold_cols = ["fold_id", "test_start", "partial"] + (
+        ["n_estimators"] if "n_estimators" in scheme["folds"][0] else []
+    )
+    folds_df = pd.DataFrame(scheme["folds"])[fold_cols]
     perf_df = pd.DataFrame(metrics["results"]["per_fold"])
     fold_table = folds_df.merge(perf_df, on="fold_id")
     fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(fold_table["partial"], " (partial)", "")
     year_label = dict(zip(fold_table["fold_id"], fold_table["Test year"], strict=True))
 
     st.subheader("Per-Fold Results")
+    ci = fold_table["excess_precision_top15_ci95"].apply(lambda c: f"{c[0] * 100:+.1f} to {c[1] * 100:+.1f}")
     display = pd.DataFrame(
         {
             "Test year": fold_table["Test year"],
+            "Trees": fold_table["n_estimators"] if "n_estimators" in fold_table else "",
             "Test rows": fold_table["n_test_rows"],
             "ROC AUC": fold_table["roc_auc"].round(3),
+            "Per-day AUC": fold_table["daily_auc_mean"].round(3) if "daily_auc_mean" in fold_table else "",
             "Brier": fold_table["brier"].round(3),
-            "Base rate": (fold_table["base_rate"] * 100).round(1),
+            "Base rate (%)": (fold_table["base_rate"] * 100).round(1),
             "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
             "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
+            "Excess 95% CI (pts)": ci,
             "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
         }
     )
@@ -863,6 +899,8 @@ def render_validation() -> None:
         )
         st.plotly_chart(style_plotly(fig_rel, height=400), width="stretch")
 
+    render_backtest(metrics, val_backtest)
+
     with st.expander("How this validation works"):
         st.markdown(
             f"""
@@ -886,12 +924,15 @@ def render_validation() -> None:
             cross-section by predicted probability, take the top 15, and
             measure how many hit the take-profit barrier first. The base
             rate is the same quantity for the whole cross-section, so the
-            excess is the value added by the ranking. ROC AUC and the
-            Brier score are computed over all test rows; the reliability
-            curve shows whether predicted probabilities match observed
-            frequencies. Confidence intervals use a moving-block bootstrap
-            (block length {scheme["purge_trading_days"]}) because
-            overlapping label windows make consecutive days dependent.
+            excess is the value added by the ranking. Pooled ROC AUC and the
+            Brier score are computed over all test rows; the per-day AUC is
+            computed inside each day and averaged, which strips out the
+            model's ability to tell good days from bad and leaves only
+            ranking skill. The reliability curve shows whether predicted
+            probabilities match observed frequencies. Confidence intervals
+            use a moving-block bootstrap (block length
+            {scheme["purge_trading_days"]}) because overlapping label
+            windows make consecutive days dependent.
 
             The full implementation is in `evaluate.py`; every number on
             this page is read from `data/validation_metrics.json`, which
@@ -899,6 +940,97 @@ def render_validation() -> None:
             and git commit that produced it.
             """
         )
+
+
+def render_backtest(metrics: dict, bt: pd.DataFrame) -> None:
+    block = metrics["results"].get("backtest")
+    if not block or bt.empty:
+        return
+
+    st.divider()
+    st.subheader("Portfolio Backtest (long-only, after costs)")
+    a = block["assumptions"]
+    st.markdown(
+        f"Each test day's top {a['top_n']} picks form an equal-weighted tranche held "
+        f"{a['hold_days']} trading days; {a['hold_days']} tranches overlap, so a fifth of the book rolls "
+        f"daily. Costs: {a['cost_bps_per_side']:.0f} bps per side on every entry and exit. Compared with an "
+        "equal-weighted, cost-free portfolio of the whole eligible cross-section (what the ranking chooses "
+        "from) and with SPY. Same out-of-sample predictions as the metrics above."
+    )
+
+    series = block["series"]
+    net, gross, ew, spy = series["strategy_net"], series["strategy_gross"], series["universe_ew"], series["spy"]
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric(
+        "Ann. return (net)",
+        f"{net['ann_return'] * 100:+.1f}%",
+        delta=f"{(net['ann_return'] - ew['ann_return']) * 100:+.1f} pts vs universe EW",
+    )
+    b2.metric(
+        "Ann. return (gross)",
+        f"{gross['ann_return'] * 100:+.1f}%",
+        help="Before costs. The gap to net is the price of rolling a fifth of the book every day.",
+    )
+    b3.metric("Sharpe (net, rf=0)", f"{net['sharpe']:.2f}", delta=f"{net['sharpe'] - ew['sharpe']:+.2f} vs universe EW")
+    b4.metric("Max drawdown (net)", f"{net['max_drawdown'] * 100:.1f}%")
+    b5.metric("SPY ann. return", f"{spy['ann_return'] * 100:+.1f}%", help="Same test window, buy and hold.")
+    atr_bt = metrics["results"].get("baselines", {}).get("atr_rank", {}).get("backtest")
+    if atr_bt:
+        st.caption(
+            f"Same book built from the volatility-only ranking: {atr_bt['strategy_net']['ann_return'] * 100:+.1f}%/yr "
+            f"net (Sharpe {atr_bt['strategy_net']['sharpe']:.2f}, max drawdown "
+            f"{atr_bt['strategy_net']['max_drawdown'] * 100:.1f}%)."
+        )
+
+    curve = bt.set_index("date")[["strategy_net", "strategy_gross", "universe_ew", "spy"]].fillna(0.0)
+    equity = (1.0 + curve).cumprod()
+    names = {
+        "strategy_net": f"Top-{a['top_n']} book, net",
+        "strategy_gross": f"Top-{a['top_n']} book, gross",
+        "universe_ew": "Universe equal-weight",
+        "spy": "SPY",
+    }
+    colors = {"strategy_net": ACCENT, "strategy_gross": "#A5B4FC", "universe_ew": MUTED, "spy": "#F59E0B"}
+    fig_eq = go.Figure()
+    for col in ["strategy_net", "strategy_gross", "universe_ew", "spy"]:
+        fig_eq.add_trace(
+            go.Scatter(
+                x=equity.index,
+                y=equity[col],
+                name=names[col],
+                line=dict(
+                    color=colors[col],
+                    width=2.5 if col == "strategy_net" else 1.5,
+                    dash="dot" if col == "strategy_gross" else None,
+                ),
+            )
+        )
+    fig_eq.update_layout(
+        title="Growth of 1 (log scale), out-of-sample test period",
+        yaxis_type="log",
+        yaxis_title="Value",
+        xaxis_title="",
+        legend=dict(orientation="h", y=1.12),
+        margin=dict(l=0, r=0, t=60, b=0),
+    )
+    st.plotly_chart(style_plotly(fig_eq, height=420), width="stretch")
+
+    by_year = pd.DataFrame(block["by_year"])
+    table = pd.DataFrame(
+        {
+            "Year": by_year["year"].astype(str) + np.where(by_year["n_days"] < 200, " (partial)", ""),
+            "Book net (%)": (by_year["strategy_net"] * 100).round(1),
+            "Book gross (%)": (by_year["strategy_gross"] * 100).round(1),
+            "Universe EW (%)": (by_year["universe_ew"] * 100).round(1),
+            "SPY (%)": (by_year["spy"] * 100).round(1),
+            "Net minus universe (pts)": ((by_year["strategy_net"] - by_year["universe_ew"]) * 100).round(1),
+        }
+    )
+    st.dataframe(table, width="stretch", hide_index=True)
+    st.caption(
+        f"Close-to-close holding, no barrier exits, no slippage or capacity model; {BACKTEST_COST_BPS:.0f} bps per "
+        f"side, {BACKTEST_HOLD_DAYS}-day hold. The universe benchmark carries the same survivorship bias as the book."
+    )
 
 
 # =============================================================================

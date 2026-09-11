@@ -10,7 +10,10 @@ from evaluate import (
     daily_cross_sectional_metrics,
     feature_causality_check,
     make_folds,
+    performance_summary,
+    rank_auc,
     reliability_bins,
+    run_backtest,
     split_fold,
 )
 from screener import FEATURE_COLUMNS, FORWARD_WINDOW_DAYS
@@ -79,6 +82,7 @@ def test_daily_cross_sectional_metrics_hand_computed():
     assert row["bottom5_pos_rate"] == 0.0
     assert row["excess_bottom5"] == pytest.approx(0.4)
     assert row["top_decile_lift"] == pytest.approx(2.5)  # k=2, both positive
+    assert row["daily_auc"] == pytest.approx(1.0)  # positives are exactly the top-ranked rows
 
 
 def test_daily_metrics_skip_small_days():
@@ -137,7 +141,9 @@ def test_run_evaluation_end_to_end_mini():
     pytest.importorskip("xgboost")
     pytest.importorskip("sklearn")
 
-    results, daily, calib = evaluate.run_evaluation(synthetic_master(), first_test_year=2020, causality_check=False)
+    results, daily, calib, backtest = evaluate.run_evaluation(
+        synthetic_master(), first_test_year=2020, causality_check=False
+    )
 
     assert len(results["folds"]) == 2  # 2020 full, 2021 partial
     assert all(1 <= f["n_estimators"] <= 1000 for f in results["folds"])
@@ -149,6 +155,20 @@ def test_run_evaluation_end_to_end_mini():
 
     n_test_days = sum(f["n_test_days"] for f in results["folds"])
     assert len(daily) == n_test_days
+    assert 0.5 < results["overall_daily"]["daily_auc_mean"] <= 1.0
+
+    # Backtest: one row per session after the first pick, benchmarks present
+    assert len(backtest) >= n_test_days - 1
+    assert backtest["n_tranches"].max() == evaluate.BACKTEST_HOLD_DAYS
+    assert (backtest["strategy_net"] <= backtest["strategy_gross"]).all()
+    bt = results["backtest"]
+    assert set(bt["series"]) == {"strategy_net", "strategy_gross", "universe_ew", "spy"}
+    atr = results["baselines"]["atr_rank"]
+    assert 0.0 <= atr["daily_auc_mean"] <= 1.0 and "strategy_net" in atr["backtest"]
+    # The synthetic signal lives in feature 0, not ATR_Ratio, so the model must beat the baseline
+    assert results["overall_daily"]["daily_auc_mean"] > atr["daily_auc_mean"]
+    assert bt["series"]["strategy_net"]["n_days"] == len(backtest)
+    assert sum(y["n_days"] for y in bt["by_year"]) == len(backtest)
     assert (calib["fold_id"] == "pooled").any()
 
     for summary in results["per_fold"]:
@@ -156,3 +176,47 @@ def test_run_evaluation_end_to_end_mini():
         assert 0.0 <= summary["brier"] <= 1.0
         assert summary["n_test_rows"] > 0
         assert summary["n_days_skipped_lt_top_n"] == 0  # 20 candidates every day
+
+
+def test_rank_auc_matches_definition():
+    assert rank_auc([1, 1, 0, 0], [0.9, 0.8, 0.2, 0.1]) == 1.0
+    assert rank_auc([1, 0, 1, 0], [0.1, 0.9, 0.2, 0.8]) == 0.0
+    assert rank_auc([1, 0], [0.5, 0.5]) == 0.5  # ties count half
+    assert np.isnan(rank_auc([1, 1], [0.3, 0.4]))  # one class only
+
+
+def test_run_backtest_hand_computed():
+    cal = pd.DatetimeIndex(pd.bdate_range("2021-01-01", periods=8))
+    tickers = ["A", "B", "C"]
+    # Constant daily returns so the book's arithmetic is checkable by hand
+    returns = pd.DataFrame({"A": 0.01, "B": 0.02, "C": -0.01}, index=cal)
+    spy = pd.Series(0.005, index=cal)
+    # Picks on days 0 and 1: top-1 by p_hat is A both days
+    scored = pd.DataFrame(
+        {"Ticker": tickers * 2, "Target": [1, 0, 0] * 2, "p_hat": [0.9, 0.5, 0.1] * 2},
+        index=cal[[0, 0, 0, 1, 1, 1]],
+    )
+    bt = run_backtest(scored, returns, spy, top_n=1, hold_days=2, cost_bps=10.0)
+    bt = bt.set_index("date")
+
+    # Day 1: one tranche (opened day 0), entry cost only
+    assert bt.loc[cal[1], "strategy_gross"] == pytest.approx(0.01)
+    assert bt.loc[cal[1], "strategy_net"] == pytest.approx(0.01 - 0.001)
+    assert bt.loc[cal[1], "universe_ew"] == pytest.approx((0.01 + 0.02 - 0.01) / 3)
+    # Day 2: tranche from day 0 exits (cost), tranche from day 1 enters (cost)
+    assert bt.loc[cal[2], "n_tranches"] == 2
+    assert bt.loc[cal[2], "strategy_net"] == pytest.approx(0.01 - 0.001)
+    # Day 3: only the day-1 tranche remains, exiting
+    assert bt.loc[cal[3], "n_tranches"] == 1
+    assert bt.loc[cal[3], "strategy_net"] == pytest.approx(0.01 - 0.001)
+    assert cal[4] not in bt.index  # nothing held after the last tranche exits
+    assert (bt["spy"] == 0.005).all()
+
+
+def test_performance_summary_constant_return():
+    r = pd.Series([0.001] * 252)
+    s = performance_summary(r)
+    assert s["total_return"] == pytest.approx(1.001**252 - 1)
+    assert s["ann_return"] == pytest.approx(1.001**252 - 1)
+    assert s["max_drawdown"] == 0.0
+    assert s["n_days"] == 252

@@ -18,11 +18,6 @@ EQUITIES = ["AAA", "BBB"]
 N_DAYS = 80
 
 
-def constituents(tickers, date_added=None) -> pd.DataFrame:
-    """Wikipedia-shaped constituent table; unknown join dates by default."""
-    return pd.DataFrame({"Ticker": list(tickers), "Date_Added": pd.to_datetime([date_added] * len(tickers))})
-
-
 def synthetic_panel() -> pd.DataFrame:
     """A yfinance-shaped panel: MultiIndex columns (field, ticker)."""
     rng = np.random.default_rng(0)
@@ -39,10 +34,22 @@ def synthetic_panel() -> pd.DataFrame:
     return panel
 
 
+def membership(tickers, start=None, end=None, current=True) -> pd.DataFrame:
+    """Membership intervals as build_membership returns them; open-ended by default."""
+    return pd.DataFrame(
+        {
+            "Ticker": list(tickers),
+            "Start": pd.to_datetime([start] * len(tickers)),
+            "End": pd.to_datetime([end] * len(tickers)),
+            "Is_Current": [current] * len(tickers),
+        }
+    )
+
+
 @pytest.fixture
 def stubbed_market(monkeypatch):
     panel = synthetic_panel()
-    monkeypatch.setattr(screener, "fetch_sp500_constituents", lambda: constituents(EQUITIES))
+    monkeypatch.setattr(screener, "fetch_sp500_membership", lambda: membership(EQUITIES))
     monkeypatch.setattr(
         screener,
         "download_market_data",
@@ -54,9 +61,9 @@ def stubbed_market(monkeypatch):
 def test_join_date_truncates_pre_membership_rows(monkeypatch):
     panel = synthetic_panel()
     joined = panel.index[30]
-    table = constituents(EQUITIES)
-    table.loc[table["Ticker"] == "BBB", "Date_Added"] = joined
-    monkeypatch.setattr(screener, "fetch_sp500_constituents", lambda: table)
+    table = membership(EQUITIES)
+    table.loc[table["Ticker"] == "BBB", "Start"] = joined
+    monkeypatch.setattr(screener, "fetch_sp500_membership", lambda: table)
     monkeypatch.setattr(screener, "download_market_data", lambda tickers, start=None: panel)
 
     master_df, metadata = build_master_dataframe()
@@ -69,11 +76,88 @@ def test_join_date_truncates_pre_membership_rows(monkeypatch):
     # Features on the join day still use the pre-join price history: the
     # 20-day rolling windows are already warm, so the first row is complete.
     assert bbb.iloc[0][FEATURE_COLUMNS].notna().all()
-    assert metadata["join_date_truncation"] == {
-        "applied": True,
-        "n_tickers_truncated": 1,
-        "n_tickers_unknown_join_date": 1,
+    assert metadata["current_tickers"] == EQUITIES
+    assert metadata["universe"]["n_current"] == 2
+    assert metadata["universe"]["n_removed_since_start"] == 0
+
+
+def test_removed_member_is_trained_on_but_never_a_candidate(monkeypatch):
+    panel = synthetic_panel()
+    removed_on = panel.index[50]
+    # OLD has prices for the whole window but left the index on day 50
+    for field in ("Close", "High", "Low", "Volume"):
+        panel[(field, "OLD")] = panel[(field, "AAA")].to_numpy() * 0.5
+    table = pd.concat([membership(EQUITIES), membership(["OLD"], end=removed_on, current=False)])
+    monkeypatch.setattr(screener, "fetch_sp500_membership", lambda: table)
+    monkeypatch.setattr(screener, "download_market_data", lambda tickers, start=None: panel)
+
+    master_df, metadata = build_master_dataframe()
+    old = master_df[master_df["Ticker"] == "OLD"]
+    assert len(old) == 50 and old.index.max() < removed_on  # rows only while a member
+    assert metadata["tickers"] == [*EQUITIES, "OLD"]
+    assert metadata["current_tickers"] == EQUITIES
+    assert metadata["universe"] == {
+        "type": "point_in_time",
+        "n_current": 2,
+        "n_removed_since_start": 1,
+        "n_removed_with_price_data": 1,
+        "removed_without_price_data": [],
     }
+
+    train_df, latest_df, _ = build_dataset()
+    assert "OLD" in set(train_df["Ticker"])  # its history is real training data
+    assert set(latest_df["Ticker"]) == set(EQUITIES)  # but it cannot be today's pick
+
+
+def test_removed_member_without_prices_is_reported(monkeypatch):
+    panel = synthetic_panel()
+    table = pd.concat([membership(EQUITIES), membership(["GONE"], end=panel.index[40], current=False)])
+    monkeypatch.setattr(screener, "fetch_sp500_membership", lambda: table)
+    monkeypatch.setattr(screener, "download_market_data", lambda tickers, start=None: panel)
+    _, metadata = build_master_dataframe()
+    assert metadata["universe"]["n_removed_with_price_data"] == 0
+    assert metadata["universe"]["removed_without_price_data"] == ["GONE"]
+
+
+def test_build_membership_intervals():
+    constituents = pd.DataFrame(
+        {"Ticker": ["CUR", "REUSED"], "Date_Added": pd.to_datetime(["2016-03-01", "2020-01-01"])}
+    )
+    changes = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(
+                ["2010-05-01", "2018-06-01", "2019-02-01", "2014-01-01", "2017-01-01", "2022-01-01"]
+            ),
+            "Added": ["OLD", None, None, None, None, None],
+            "Removed": [None, "OLD", "NOREC", "EARLY", "AGAIN", "REUSED"],
+        }
+    )
+    m = screener.build_membership(constituents, changes, start="2015-01-01")
+    rows = {(r.Ticker, r.Is_Current): (r.Start, r.End) for r in m.itertuples()}
+
+    cur_start, cur_end = rows[("CUR", True)]
+    assert cur_start == pd.Timestamp("2016-03-01") and pd.isna(cur_end)
+    assert rows[("OLD", False)] == (pd.Timestamp("2010-05-01"), pd.Timestamp("2018-06-01"))
+    start, end = rows[("NOREC", False)]
+    assert pd.isna(start) and end == pd.Timestamp("2019-02-01")  # no addition on record
+    assert ("EARLY", False) not in rows  # removed before the data starts
+    assert rows[("AGAIN", False)][1] == pd.Timestamp("2017-01-01")
+    # REUSED was removed in 2022 but the symbol is current again: only the current row
+    assert ("REUSED", False) not in rows and ("REUSED", True) in rows
+
+
+def test_membership_mask_multiple_intervals():
+    idx = pd.bdate_range("2020-01-01", periods=10)
+    intervals = pd.DataFrame(
+        {
+            "Ticker": ["X", "X"],
+            "Start": [pd.NaT, idx[6]],
+            "End": [idx[3], pd.NaT],
+            "Is_Current": [False, True],
+        }
+    )
+    mask = screener.membership_mask(idx, intervals)
+    assert mask.tolist() == [True, True, True, False, False, False, True, True, True, True]
 
 
 def test_volume_is_not_forward_filled():
@@ -117,7 +201,7 @@ def test_tickers_with_no_prices_are_excluded(monkeypatch):
     panel = synthetic_panel()
     for field in ("Close", "High", "Low", "Volume"):
         panel[(field, "GHOST")] = np.nan
-    monkeypatch.setattr(screener, "fetch_sp500_constituents", lambda: constituents([*EQUITIES, "GHOST"]))
+    monkeypatch.setattr(screener, "fetch_sp500_membership", lambda: membership([*EQUITIES, "GHOST"]))
     monkeypatch.setattr(screener, "download_market_data", lambda tickers, start=None: panel)
 
     master_df, metadata = build_master_dataframe()

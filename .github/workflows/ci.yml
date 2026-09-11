@@ -14,13 +14,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
-      # App deps plus pytest/ruff/xgboost. No torch or transformers:
-      # screener.py imports them lazily and the tests stub the sentiment
-      # model, so the suite runs network-free in about a minute.
-      - run: pip install -r requirements.txt -r requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
+      # Pinned resolution of requirements.txt + requirements-dev.txt (Linux,
+      # py3.12). No torch or transformers: screener.py imports them lazily and
+      # the tests stub the sentiment model. Regenerate with the command at the
+      # top of the lock file.
+      - run: pip install -r requirements-dev.lock
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
