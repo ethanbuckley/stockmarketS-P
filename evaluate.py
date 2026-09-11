@@ -42,26 +42,32 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from screener import (
+from config import (
     BOTTOM_N_CANDIDATES,
+    DATA_DIR,
     DATA_START_DATE,
+    EARLY_STOPPING_ROUNDS,
+    EARLY_STOPPING_VALIDATION_FRACTION,
     FEATURE_COLUMNS,
     FORWARD_WINDOW_DAYS,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     TOP_N_CANDIDATES,
+    VALIDATION_CALIBRATION_PATH,
+    VALIDATION_DAILY_PATH,
+    VALIDATION_METRICS_PATH,
     XGB_PARAMS,
-    build_master_dataframe,
-    build_technical_features,
-    train_model,
 )
+from screener import build_master_dataframe, build_technical_features, train_model
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-METRICS_PATH = os.path.join(DATA_DIR, "validation_metrics.json")
-DAILY_PATH = os.path.join(DATA_DIR, "validation_daily.csv")
-CALIBRATION_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
+METRICS_PATH = VALIDATION_METRICS_PATH
+DAILY_PATH = VALIDATION_DAILY_PATH
+CALIBRATION_PATH = VALIDATION_CALIBRATION_PATH
 
-SCHEMA_VERSION = 1
+# Bumped when the artefact layout or the meaning of a recorded number
+# changes. 2: join-date truncation of the universe, early-stopped tree
+# count per fold, volume no longer forward-filled.
+SCHEMA_VERSION = 2
 
 
 def _roc_auc(y, p) -> float:
@@ -83,11 +89,11 @@ TECHNICAL_FEATURES = [
 # Wording is shipped inside the same artefact as the numbers, so the app and
 # README cannot quote a metric without its caveats travelling with it.
 CAVEATS = [
-    "Survivorship bias: the universe is today's S&P 500 constituents applied "
-    "retroactively to the full 2015+ history. Stocks removed from the index "
-    "along the way are absent, which biases measured hit rates upward. "
-    "Historical constituent lists are not freely available, so this is "
-    "documented rather than corrected.",
+    "Survivorship bias: the universe is today's S&P 500 constituents. Each "
+    "ticker enters the panel only from the date it joined the index (taken "
+    "from the Wikipedia constituents table), so no pre-membership history is "
+    "used; but companies removed from the index since 2015 are absent, and "
+    "that half of the bias still inflates measured hit rates.",
     "Prices are a single yfinance snapshot with auto-adjustment applied at "
     "download time; adjusted history can differ slightly from what was "
     "observable in real time.",
@@ -447,6 +453,7 @@ def run_evaluation(
                 "n_test_rows": int(len(test)),
                 "n_test_days": int(daily.shape[0]),
                 "n_tickers_in_test": int(test["Ticker"].nunique()),
+                "n_estimators": int(model.get_params()["n_estimators"]),
                 "partial": fold.partial,
             }
         )
@@ -462,6 +469,7 @@ def run_evaluation(
             f"{', partial' if fold.partial else ''}): "
             f"train {len(train):,} rows to {train.index.max().date()}, "
             f"test {len(test):,} rows, "
+            f"{model.get_params()['n_estimators']} trees, "
             f"AUC {summary['roc_auc']:.4f} (train {train_auc:.4f}), "
             f"P@15 {summary['precision_top15_mean']:.3f} "
             f"vs base {summary['base_rate_daily_mean']:.3f} "
@@ -609,6 +617,7 @@ def write_artefacts(
             "last_price_date": metadata.get("last_price_date"),
             "n_tickers": len(metadata.get("tickers", [])),
             "ticker_source": "Wikipedia S&P 500 constituents as of the download date",
+            "join_date_truncation": metadata.get("join_date_truncation", {"applied": False}),
             "cache_used": cache_used,
             "versions": _library_versions(),
         },
@@ -625,6 +634,14 @@ def write_artefacts(
         "model": {
             "type": "XGBClassifier",
             "params": XGB_PARAMS,
+            "n_estimators_note": (
+                "params.n_estimators is a ceiling. Per fold, the tree count is "
+                "chosen by early stopping on the most recent "
+                f"{EARLY_STOPPING_VALIDATION_FRACTION:.0%} of training dates "
+                f"(purged by {FORWARD_WINDOW_DAYS} days, patience "
+                f"{EARLY_STOPPING_ROUNDS} rounds), then the model is refit on "
+                "all training rows; see validation_scheme.folds[*].n_estimators."
+            ),
             "feature_columns": FEATURE_COLUMNS,
         },
         "validation_scheme": {

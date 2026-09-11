@@ -7,33 +7,37 @@ Deploy to Streamlit Community Cloud; no heavy ML dependencies required.
 
 import json
 import os
-import time
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
+
+# config.py is dependency-free, so importing it never pulls xgboost/torch
+# into the deployed app.
+from config import (
+    BOTTOM_N_CANDIDATES,
+    CANDIDATE_PRICES_PATH,
+    LONG_POOL,
+    SHORT_POOL,
+    SIGNALS_PATH,
+    TOP_N_CANDIDATES,
+    VALIDATION_CALIBRATION_PATH,
+    VALIDATION_DAILY_PATH,
+    VALIDATION_METRICS_PATH,
+)
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-SIGNALS_PATH = os.path.join(DATA_DIR, "latest_signals.csv")
-VALIDATION_METRICS_PATH = os.path.join(DATA_DIR, "validation_metrics.json")
-VALIDATION_DAILY_PATH = os.path.join(DATA_DIR, "validation_daily.csv")
-VALIDATION_CALIB_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
-
-# Long/short confluence thresholds (percent confidence). Kept in sync by hand
-# with LONG_CONFIDENCE_PCT / SHORT_CONFIDENCE_PCT in screener.py; the app does
-# not import screener so the deployed dashboard never pulls pipeline deps.
-LONG_CONFIDENCE_PCT = 55.0
-SHORT_CONFIDENCE_PCT = 45.0
-
-LONG_LABEL = f"Long candidates (Conf > {LONG_CONFIDENCE_PCT:.0f}%, Sent > 0)"
-SHORT_LABEL = f"Short candidates (Conf < {SHORT_CONFIDENCE_PCT:.0f}%, Sent < 0)"
+LONG_LABEL = f"Long candidates (top-{TOP_N_CANDIDATES} pool, Sent > 0)"
+SHORT_LABEL = f"Short candidates (bottom-{BOTTOM_N_CANDIDATES} pool, Sent < 0)"
+POOL_LABEL = {
+    LONG_POOL: f"Long pool (top {TOP_N_CANDIDATES})",
+    SHORT_POOL: f"Short pool (bottom {BOTTOM_N_CANDIDATES})",
+}
 
 MC_HORIZONS = {"1 month (21 days)": 21, "3 months (63 days)": 63, "1 year (252 days)": 252}
 
@@ -108,11 +112,11 @@ def style_plotly(fig, height=None):
 
 
 def is_long(df: pd.DataFrame) -> pd.Series:
-    return (df["Confidence"] > LONG_CONFIDENCE_PCT) & (df["Sentiment_Score"] > 0)
+    return (df["Signal_Pool"] == LONG_POOL) & (df["Sentiment_Score"] > 0)
 
 
 def is_short(df: pd.DataFrame) -> pd.Series:
-    return (df["Confidence"] < SHORT_CONFIDENCE_PCT) & (df["Sentiment_Score"] < 0)
+    return (df["Signal_Pool"] == SHORT_POOL) & (df["Sentiment_Score"] < 0)
 
 
 # =============================================================================
@@ -121,7 +125,21 @@ def is_short(df: pd.DataFrame) -> pd.Series:
 
 @st.cache_data(ttl=3600)
 def load_signals(path: str) -> pd.DataFrame:
-    return pd.read_csv(path)
+    df = pd.read_csv(path)
+    if "Signal_Pool" not in df.columns:
+        # Older signal files predate the column: the leaderboard is the top
+        # TOP_N and bottom BOTTOM_N by confidence, so recover the pools by rank.
+        ranked = df["Confidence"].rank(ascending=False, method="first")
+        df["Signal_Pool"] = np.where(ranked <= TOP_N_CANDIDATES, LONG_POOL, SHORT_POOL)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_candidate_prices(path: str) -> pd.DataFrame:
+    """Adjusted closes written by generate_signals.py; empty frame if absent."""
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    return pd.read_csv(path, index_col="Date", parse_dates=["Date"])
 
 
 @st.cache_data(ttl=3600)
@@ -129,45 +147,8 @@ def load_validation_artefacts():
     with open(VALIDATION_METRICS_PATH) as f:
         metrics = json.load(f)
     daily = pd.read_csv(VALIDATION_DAILY_PATH, parse_dates=["date"])
-    calib = pd.read_csv(VALIDATION_CALIB_PATH)
+    calib = pd.read_csv(VALIDATION_CALIBRATION_PATH)
     return metrics, daily, calib
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_prices(tickers: tuple[str, ...], period: str = "1y") -> pd.DataFrame:
-    """Download adjusted close prices for a tuple of tickers.
-
-    Retries a few times (Yahoo throttles shared cloud IPs) and returns an empty
-    DataFrame on persistent failure so callers can degrade gracefully instead of
-    crashing the dashboard. Tickers with too little history are dropped rather
-    than allowed to collapse the whole aligned panel.
-    """
-    raw = None
-    for attempt in range(3):
-        try:
-            raw = yf.download(
-                list(tickers), period=period, progress=False,
-                auto_adjust=True, threads=True,
-            )
-        except Exception:  # transient network/yfinance failure
-            raw = None
-        if raw is not None and not raw.empty:
-            break
-        time.sleep(1.0 + attempt)
-
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-
-    if isinstance(raw.columns, pd.MultiIndex):
-        prices = raw["Close"].copy()
-    else:
-        prices = raw[["Close"]].copy()
-        prices.columns = list(tickers)
-
-    prices = prices.dropna(how="all")
-    # Keep only tickers with enough observations, then align the panel.
-    enough = prices.columns[prices.notna().sum() >= 60]
-    return prices[enough].dropna()
 
 
 # =============================================================================
@@ -360,21 +341,24 @@ def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
 
     with col_right:
         st.subheader("Confidence vs Sentiment")
+        plot_df = df.assign(Pool=df["Signal_Pool"].map(POOL_LABEL))
         fig_scatter = px.scatter(
-            df, x="Sentiment_Score", y="Confidence", text="Ticker",
-            color="Confidence", color_continuous_scale="RdYlGn",
+            plot_df, x="Sentiment_Score", y="Confidence", text="Ticker", color="Pool",
+            color_discrete_map={POOL_LABEL[LONG_POOL]: "#34D399", POOL_LABEL[SHORT_POOL]: "#F87171"},
             labels={"Sentiment_Score": "FinBERT Sentiment Score",
                     "Confidence": "XGBoost Confidence (%)"},
             title="Signal Map",
         )
         fig_scatter.update_traces(textposition="top center", marker_size=8)
-        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
-        fig_scatter.add_hline(y=LONG_CONFIDENCE_PCT, line_dash="dash", line_color="green", opacity=0.5,
-                              annotation_text="Long threshold", annotation_position="right")
-        fig_scatter.add_hline(y=SHORT_CONFIDENCE_PCT, line_dash="dash", line_color="red", opacity=0.5,
-                              annotation_text="Short threshold", annotation_position="right")
-        fig_scatter.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
+        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5,
+                              annotation_text="neutral news", annotation_position="top")
+        fig_scatter.update_layout(legend=dict(orientation="h", y=1.12), margin=dict(l=0, r=0, t=60, b=0))
         st.plotly_chart(style_plotly(fig_scatter), width="stretch")
+        st.caption(
+            "Confidence is the model's probability that the +4% barrier is hit before "
+            "the −4% barrier within 5 trading days. Compare it with the ~25–30% base rate, "
+            "not with 50%: a well-calibrated 50% is roughly twice the market's hit rate."
+        )
 
     st.divider()
 
@@ -411,12 +395,15 @@ def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
 
             | Signal | Condition |
             |--------|-----------|
-            | Long candidate | Confidence > {LONG_CONFIDENCE_PCT:.0f}% **and** Sentiment > 0 |
-            | Short candidate | Confidence < {SHORT_CONFIDENCE_PCT:.0f}% **and** Sentiment < 0 |
+            | Long candidate | In the top-{TOP_N_CANDIDATES} pool by confidence **and** Sentiment > 0 |
+            | Short candidate | In the bottom-{BOTTOM_N_CANDIDATES} pool by confidence **and** Sentiment < 0 |
 
-            High confidence alone is not a buy signal: both the quantitative and qualitative
-            signals should align. Mixed signals (high confidence, negative sentiment) warrant
-            caution.
+            The pools are rank-based, not threshold-based. The label asks whether +4% is
+            hit before −4% within 5 days, which happens for only about a quarter to a
+            third of stock-days, so a probability near 50% is already well above the
+            base rate. Pool membership alone is not a buy signal: both the quantitative
+            and qualitative signals should align. Mixed signals (long pool, negative
+            sentiment) warrant caution.
             """
         )
 
@@ -430,9 +417,19 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
         "Cholesky decomposition of the empirical correlation matrix."
     )
 
+    # Early exits use `return`, not st.stop(): stopping here would also blank
+    # the Model Validation tab and the footer, which render after this tab.
+    all_prices = load_candidate_prices(CANDIDATE_PRICES_PATH)
+    if all_prices.empty:
+        st.info(
+            "No price history found at `data/candidate_prices.csv`. It is written "
+            "alongside the signals by `python generate_signals.py`; commit both files."
+        )
+        return
+
     # ── Controls ──────────────────────────────────────────────────────────────
-    all_tickers = df["Ticker"].tolist()
-    default_tickers = df.nlargest(5, "Confidence")["Ticker"].tolist()
+    all_tickers = [t for t in df["Ticker"] if t in all_prices.columns]
+    default_tickers = [t for t in df.nlargest(5, "Confidence")["Ticker"] if t in all_tickers]
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
@@ -449,25 +446,23 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
     with c4:
         initial_value = float(st.number_input("Initial portfolio ($)", value=10_000, step=1_000))
 
-    # Early exits use `return`, not st.stop(): stopping here would also blank
-    # the Model Validation tab and the footer, which render after this tab.
     if not chosen:
         st.info("Select at least one ticker above to run the simulation.")
         return
 
-    # ── Fetch & simulate ──────────────────────────────────────────────────────
-    with st.spinner(f"Fetching 1 year of price history for {', '.join(chosen)} …"):
-        prices = fetch_prices(tuple(chosen), period="1y")
-
-    prices = prices[[t for t in chosen if t in prices.columns]]
+    # ── Simulate ──────────────────────────────────────────────────────────────
+    # Aligned panel: a ticker with a shorter history shortens everyone's
+    # window, so drop names with too few observations first.
+    prices = all_prices[chosen].dropna(how="all")
+    enough = prices.columns[prices.notna().sum() >= 60]
+    too_short = [t for t in chosen if t not in enough]
+    if too_short:
+        st.warning(f"Too little price history for: {', '.join(too_short)}.")
+    prices = prices[enough].dropna()
 
     if prices.shape[1] == 0:
-        st.error("Could not fetch price data for any selected ticker (yfinance).")
+        st.error("No selected ticker has enough price history to simulate.")
         return
-
-    not_fetched = [t for t in chosen if t not in prices.columns]
-    if not_fetched:
-        st.warning(f"No price data for: {', '.join(not_fetched)}.")
 
     log_ret = np.log(prices / prices.shift(1)).dropna()
 
@@ -590,6 +585,11 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
     st.plotly_chart(style_plotly(fig_hist), width="stretch")
 
     # ── Individual asset stats ─────────────────────────────────────────────────
+    st.caption(
+        f"Calibrated on {log_ret.shape[0]} trading days of adjusted closes ending "
+        f"{prices.index.max():%Y-%m-%d}, written with the signals by generate_signals.py."
+    )
+
     with st.expander("Individual asset statistics (from historical data)"):
         ann_ret = log_ret.mean() * 252
         ann_vol = log_ret.std() * np.sqrt(252)
@@ -601,7 +601,7 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
         })
         st.dataframe(asset_stats, width="stretch", hide_index=True)
 
-        st.markdown("**Return correlation matrix (1-year daily)**")
+        st.markdown("**Return correlation matrix (daily, committed history)**")
         st.dataframe(log_ret.corr().round(3), width="stretch")
 
     with st.expander("Methodology"):
@@ -613,8 +613,8 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
 
             > ln(S_{t+1}/S_t) = μ + σ · Z_t
 
-            where μ and σ are the mean and standard deviation of 1 year of
-            historical daily log-returns, and Z_t is a standard normal random
+            where μ and σ are the mean and standard deviation of the committed
+            year of historical daily log-returns, and Z_t is a standard normal random
             variable. Because μ is estimated directly as the mean *log*-return,
             log-returns are simulated as N(μ, σ²); the Itô "−½σ²" term is not
             subtracted again (doing so would double-count it and bias the drift
@@ -658,7 +658,7 @@ def render_validation() -> None:
 
     artefacts_present = all(
         os.path.exists(p)
-        for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIB_PATH)
+        for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIBRATION_PATH)
     )
     if not artefacts_present:
         st.info(

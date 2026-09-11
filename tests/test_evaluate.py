@@ -142,6 +142,7 @@ def test_run_evaluation_end_to_end_mini():
     )
 
     assert len(results["folds"]) == 2  # 2020 full, 2021 partial
+    assert all(1 <= f["n_estimators"] <= 1000 for f in results["folds"])
     assert results["folds"][0]["partial"] is False
     assert results["folds"][1]["partial"] is True
 

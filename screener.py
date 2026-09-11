@@ -11,6 +11,8 @@ within a 5-day forward window, a "triple-barrier labelling" approach from financ
 Usage:
     python screener.py [--tickers-limit N] [--skip-sentiment]
 
+Tunable settings live in config.py.
+
 Author: Ethan Buckley
 """
 
@@ -23,7 +25,7 @@ import os
 import sys
 import warnings
 from io import StringIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -31,68 +33,48 @@ import requests
 import yfinance as yf
 from numpy.lib.stride_tricks import sliding_window_view
 
+from config import (  # noqa: F401  (re-exported for callers and tests)
+    BOTTOM_N_CANDIDATES,
+    DATA_START_DATE,
+    EARLY_STOPPING_MIN_VALIDATION_DAYS,
+    EARLY_STOPPING_ROUNDS,
+    EARLY_STOPPING_VALIDATION_FRACTION,
+    FEATURE_COLUMNS,
+    FORWARD_WINDOW_DAYS,
+    LONG_POOL,
+    MACRO_TICKERS,
+    NEWS_ARTICLES_PER_TICKER,
+    NEWS_MAX_AGE_DAYS,
+    PRICE_HISTORY_DAYS,
+    SHORT_POOL,
+    STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
+    TOP_N_CANDIDATES,
+    XGB_PARAMS,
+)
+
 if TYPE_CHECKING:
     from xgboost import XGBClassifier
 
 logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# CONFIGURATION: all magic numbers in one place for easy adjustment
-# =============================================================================
-
-DATA_START_DATE = "2015-01-01"
-
-# Triple-barrier labelling parameters
-FORWARD_WINDOW_DAYS = 5   # How many trading days ahead to look
-TAKE_PROFIT_PCT = 0.04    # +4% triggers a positive label (1)
-STOP_LOSS_PCT = 0.04      # -4% triggers a negative label (0)
-
-# XGBoost hyperparameters
-XGB_PARAMS = {
-    "n_estimators": 300,
-    "learning_rate": 0.05,
-    "max_depth": 5,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "random_state": 42,
-    "eval_metric": "logloss",
-}
-
-# How many candidates to deep-dive with FinBERT sentiment
-TOP_N_CANDIDATES = 15   # Long candidates (highest predicted probability)
-BOTTOM_N_CANDIDATES = 5  # Short candidates (lowest predicted probability)
-NEWS_ARTICLES_PER_TICKER = 10
-
-# Macro benchmark ETFs and indices used as market-context features
-MACRO_TICKERS = ["SPY", "QQQ", "SMH", "^VIX", "^TNX"]
-
-# The feature set fed to XGBoost; each feature is listed explicitly for clarity
-FEATURE_COLUMNS = [
-    "Return", "RSI", "MACD", "BB_Position",
-    "Price_to_VWAP", "ATR_Ratio", "Volume_Surge", "Day_Of_Week",
-    "SPY_Return", "QQQ_Return", "SMH_Return", "VIX_Change", "TNX_Change",
-    "Rel_SPY", "Rel_QQQ", "Rel_SMH",
-    "Return_Lag_1", "Return_Lag_2", "Return_Lag_3",
-    "QQQ_Lag_1", "QQQ_Lag_2", "QQQ_Lag_3",
-]
-
-# Interpretation thresholds (percent confidence) used by the console output
-# and the dashboard when flagging long/short confluence with sentiment.
-LONG_CONFIDENCE_PCT = 55.0
-SHORT_CONFIDENCE_PCT = 45.0
+PRICE_FIELDS = ["Open", "High", "Low", "Close"]
 
 
 # =============================================================================
 # STEP 1: DATA ACQUISITION
 # =============================================================================
 
-def fetch_sp500_tickers() -> list[str]:
+def fetch_sp500_constituents() -> pd.DataFrame:
     """
-    Scrapes the current S&P 500 constituent list from Wikipedia.
+    Scrapes the current S&P 500 constituent table from Wikipedia.
 
-    Returns a list of ticker symbols with dots replaced by hyphens
-    (e.g. BRK.B -> BRK-B) to match the Yahoo Finance format.
+    Returns a DataFrame with columns:
+      - Ticker: symbol with dots replaced by hyphens (BRK.B -> BRK-B) to
+        match the Yahoo Finance format
+      - Date_Added: when the company joined the index (NaT if unparseable).
+        build_master_dataframe drops each ticker's rows before this date so
+        the training panel does not contain pre-membership history.
 
     Raises RuntimeError if the page cannot be fetched or the constituents
     table cannot be parsed: a silently wrong universe would corrupt
@@ -116,19 +98,35 @@ def fetch_sp500_tickers() -> list[str]:
             "Could not parse the S&P 500 constituents table from Wikipedia "
             "(the page layout may have changed)."
         )
-    tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
-    if len(tickers) < 400:
+    table = tables[0]
+    constituents = pd.DataFrame(
+        {
+            "Ticker": table["Symbol"].str.replace(".", "-", regex=False),
+            "Date_Added": pd.to_datetime(table.get("Date added"), errors="coerce"),
+        }
+    )
+    if len(constituents) < 400:
         raise RuntimeError(
-            f"Parsed only {len(tickers)} tickers from Wikipedia; expected roughly 500. "
+            f"Parsed only {len(constituents)} tickers from Wikipedia; expected roughly 500. "
             "Refusing to continue with a partial universe."
         )
-    return tickers
+    return constituents
+
+
+def fetch_sp500_tickers() -> list[str]:
+    """Current S&P 500 symbols in Yahoo Finance format."""
+    return fetch_sp500_constituents()["Ticker"].tolist()
 
 
 def download_market_data(tickers: list[str], start: str = DATA_START_DATE) -> pd.DataFrame:
     """
     Downloads OHLCV data for all tickers from Yahoo Finance.
-    Forward-fills missing values to handle non-trading days and data gaps.
+
+    Prices are forward-filled so that macro series with their own holiday
+    calendars (^TNX closes on bond-market holidays) still align with equity
+    rows. Volume is NOT filled: a day with no trade has no volume, and
+    leaving it NaN means the volume features are NaN and the row is dropped
+    rather than trained on as if it were a real session.
 
     auto_adjust is passed explicitly because yfinance changed its default
     between versions; adjusted prices are required so that splits and
@@ -149,7 +147,9 @@ def download_market_data(tickers: list[str], start: str = DATA_START_DATE) -> pd
     if isinstance(data.index, pd.DatetimeIndex) and data.index.tz is not None:
         data.index = data.index.tz_localize(None)
 
-    return data.ffill()
+    is_price = data.columns.get_level_values(0).isin(PRICE_FIELDS)
+    data.loc[:, is_price] = data.loc[:, is_price].ffill()
+    return data
 
 
 def tickers_with_data(raw_data: pd.DataFrame) -> list[str]:
@@ -327,15 +327,21 @@ def build_master_dataframe(
     Returns (master_df, metadata):
       - master_df: one row per (date, ticker) on the union yfinance calendar
         (tz-naive DatetimeIndex), with OHLCV, Ticker, all FEATURE_COLUMNS and
-        Target. No dropna and no date filtering is applied here; callers
-        (training, prediction, walk-forward evaluation) do their own filtering.
-      - metadata: download timestamp, ticker list, and last price date, so
-        downstream artefacts can record exactly which data snapshot they used.
+        Target. Features are computed on each ticker's full price history,
+        but rows dated before the ticker joined the S&P 500 are dropped: the
+        stock existed then, but it was not in the universe this screener
+        ranks. No dropna is applied here; callers (training, prediction,
+        walk-forward evaluation) do their own filtering.
+      - metadata: download timestamp, ticker list, last price date and the
+        join-date truncation summary, so downstream artefacts can record
+        exactly which data snapshot they used.
     """
-    print("Fetching live S&P 500 ticker list from Wikipedia...")
-    tickers = fetch_sp500_tickers()
+    print("Fetching live S&P 500 constituent table from Wikipedia...")
+    constituents = fetch_sp500_constituents()
     if tickers_limit is not None:
-        tickers = tickers[:tickers_limit]
+        constituents = constituents.head(tickers_limit)
+    tickers = constituents["Ticker"].tolist()
+    join_dates = dict(zip(constituents["Ticker"], constituents["Date_Added"], strict=True))
 
     print(f"Downloading market data for {len(tickers)} stocks since {start}...")
     raw_data = download_market_data(tickers, start=start)
@@ -345,22 +351,38 @@ def build_master_dataframe(
     available = [t for t in tickers if t in with_data]
 
     print("Engineering features for all tickers...")
-    master_df = pd.concat([process_ticker(t, raw_data) for t in available])
+    frames = []
+    n_truncated = 0
+    for ticker in available:
+        df = process_ticker(ticker, raw_data)
+        joined = join_dates.get(ticker)
+        if pd.notna(joined) and joined > df.index.min():
+            df = df[df.index >= joined]
+            n_truncated += 1
+        frames.append(df)
+    master_df = pd.concat(frames)
 
     metadata = {
         "download_timestamp_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tickers": available,
         "last_price_date": str(master_df.index.max().date()),
+        "join_date_truncation": {
+            "applied": True,
+            "n_tickers_truncated": n_truncated,
+            "n_tickers_unknown_join_date": int(sum(pd.isna(join_dates.get(t)) for t in available)),
+        },
     }
     return master_df, metadata
 
 
-def build_dataset(tickers_limit: int | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Builds the two frames the screener needs:
-      - train_df: all rows with complete features and a valid label
-      - latest_df: the most recent complete-feature row per ticker (today's signal)
-    """
+class Dataset(NamedTuple):
+    train: pd.DataFrame    # rows with complete features and a valid label
+    latest: pd.DataFrame   # most recent complete-feature row per ticker (today's signal)
+    master: pd.DataFrame   # the unfiltered panel (for price history export)
+
+
+def build_dataset(tickers_limit: int | None = None) -> Dataset:
+    """Builds the frames the screener needs from one download."""
     master_df, _ = build_master_dataframe(tickers_limit=tickers_limit)
 
     train_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"]).copy()
@@ -371,7 +393,22 @@ def build_dataset(tickers_limit: int | None = None) -> tuple[pd.DataFrame, pd.Da
         .tail(1)
         .copy()
     )
-    return train_df, latest_df
+    return Dataset(train_df, latest_df, master_df)
+
+
+def candidate_price_history(
+    master_df: pd.DataFrame, tickers: list[str], days: int = PRICE_HISTORY_DAYS
+) -> pd.DataFrame:
+    """
+    Wide frame of adjusted closes (one column per ticker) over the last
+    `days` trading dates in the panel. Written next to the signals so the
+    dashboard's Monte Carlo tab needs no live price download.
+    """
+    closes = master_df.loc[master_df["Ticker"].isin(tickers), ["Ticker", "Close"]]
+    wide = closes.pivot_table(index=closes.index, columns="Ticker", values="Close")
+    wide = wide.reindex(columns=[t for t in tickers if t in wide.columns])
+    wide.index.name = "Date"
+    return wide.tail(days)
 
 
 # =============================================================================
@@ -386,28 +423,78 @@ def train_model(train_df: pd.DataFrame) -> XGBClassifier:
     learns patterns that generalise across the market, not just overfit to
     one ticker's history. The output probability (predict_proba) is used
     as the ranking score, not a hard buy/sell decision.
+
+    The number of trees is chosen by early stopping (choose_n_estimators)
+    and the final model is refit on all of train_df with that count, so the
+    returned model has seen every training row. XGB_PARAMS["n_estimators"]
+    is the ceiling.
     """
     # Imported lazily so that importing this module (tests, evaluation,
     # generate_signals) does not require xgboost to be installed.
     from xgboost import XGBClassifier
 
-    model = XGBClassifier(**XGB_PARAMS)
+    n_estimators = choose_n_estimators(train_df) or XGB_PARAMS["n_estimators"]
+    model = XGBClassifier(**{**XGB_PARAMS, "n_estimators": n_estimators})
     model.fit(train_df[FEATURE_COLUMNS], train_df["Target"])
     return model
+
+
+def choose_n_estimators(train_df: pd.DataFrame) -> int | None:
+    """
+    Picks the boosting-round count by early stopping on the most recent
+    EARLY_STOPPING_VALIDATION_FRACTION of training dates.
+
+    The FORWARD_WINDOW_DAYS trading days before the validation slice are
+    purged from the fit set, exactly as evaluate.py purges before a test
+    block, so the validation labels cannot overlap the fit labels. Because
+    the slice is carved from the training data, this never touches a
+    walk-forward test period.
+
+    Returns None when the frame has no DatetimeIndex or too little history
+    for a meaningful slice; callers then fall back to the ceiling.
+    """
+    from xgboost import XGBClassifier
+
+    if not isinstance(train_df.index, pd.DatetimeIndex):
+        return None
+    dates = train_df.index.unique().sort_values()
+    n_val = int(len(dates) * EARLY_STOPPING_VALIDATION_FRACTION)
+    if n_val < EARLY_STOPPING_MIN_VALIDATION_DAYS or len(dates) - n_val - FORWARD_WINDOW_DAYS - 1 < 1:
+        return None
+
+    val_start = dates[-n_val]
+    fit_end = dates[-n_val - FORWARD_WINDOW_DAYS - 1]
+    fit = train_df[train_df.index <= fit_end]
+    val = train_df[train_df.index >= val_start]
+    if fit["Target"].nunique() < 2 or val["Target"].nunique() < 2:
+        return None
+
+    probe = XGBClassifier(**XGB_PARAMS, early_stopping_rounds=EARLY_STOPPING_ROUNDS)
+    probe.fit(
+        fit[FEATURE_COLUMNS], fit["Target"],
+        eval_set=[(val[FEATURE_COLUMNS], val["Target"])],
+        verbose=False,
+    )
+    return int(probe.best_iteration) + 1
 
 
 def score_and_rank(model: XGBClassifier, latest_df: pd.DataFrame) -> pd.DataFrame:
     """
     Scores the latest row per ticker and returns the focus list for sentiment
     analysis: the TOP_N_CANDIDATES highest and BOTTOM_N_CANDIDATES lowest by
-    predicted probability. Adds a "Probability" column; no sentiment yet.
+    predicted probability. Adds "Probability" and "Signal_Pool" (LONG_POOL
+    or SHORT_POOL) columns; no sentiment yet. Membership of a pool is the
+    model's signal; there is no absolute probability threshold, because a
+    calibrated probability of ~50% is already well above the ~25-30% base
+    rate and an absolute cut would rarely, if ever, be reached.
     """
     latest_df = latest_df.copy()
     latest_df["Probability"] = model.predict_proba(latest_df[FEATURE_COLUMNS])[:, 1]
 
-    top_candidates = latest_df.nlargest(TOP_N_CANDIDATES, "Probability")
-    bottom_candidates = latest_df.nsmallest(BOTTOM_N_CANDIDATES, "Probability")
-    # On a tiny universe (--tickers-limit) the two ends can overlap.
+    top_candidates = latest_df.nlargest(TOP_N_CANDIDATES, "Probability").assign(Signal_Pool=LONG_POOL)
+    bottom_candidates = latest_df.nsmallest(BOTTOM_N_CANDIDATES, "Probability").assign(Signal_Pool=SHORT_POOL)
+    # On a tiny universe (--tickers-limit) the two ends can overlap; the
+    # long pool wins the tie.
     return pd.concat([top_candidates, bottom_candidates]).drop_duplicates(subset="Ticker").copy()
 
 
@@ -430,9 +517,32 @@ def load_sentiment_model():
     return pipeline("sentiment-analysis", model="ProsusAI/finbert")
 
 
-def get_news_sentiment(ticker: str, sentiment_model) -> float | None:
+def _headline_and_age(article: dict, now: pd.Timestamp) -> tuple[str | None, float | None]:
+    """
+    Pulls (title, age in days) out of a yfinance news item. yfinance has used
+    two payload shapes: a flat dict with "title"/"providerPublishTime" (epoch
+    seconds) and a nested {"content": {"title", "pubDate" (ISO 8601)}}.
+    Age is None when no publish time can be parsed.
+    """
+    content = article.get("content") if isinstance(article.get("content"), dict) else article
+    title = content.get("title")
+    raw = content.get("pubDate") or content.get("displayTime") or article.get("providerPublishTime")
+    if raw in (None, ""):
+        return title, None
+    unit = "s" if isinstance(raw, (int, float)) else None
+    published = pd.to_datetime(raw, utc=True, unit=unit, errors="coerce")
+    if pd.isna(published):
+        return title, None
+    return title, (now - published).total_seconds() / 86400.0
+
+
+def get_news_sentiment(ticker: str, sentiment_model, now: pd.Timestamp | None = None) -> float | None:
     """
     Fetches recent news headlines for a ticker and scores them with FinBERT.
+
+    Only headlines published within NEWS_MAX_AGE_DAYS of `now` (default: the
+    current UTC time) are scored; items with no parseable publish time are
+    kept, since their age is unknown rather than known to be stale.
 
     Returns a float in roughly [-1, +1], or None when no verdict is possible:
       - Positive = bullish news sentiment
@@ -445,6 +555,7 @@ def get_news_sentiment(ticker: str, sentiment_model) -> float | None:
     individually; the final score is the mean of the signed scores, where
     FinBERT's positive/negative/neutral labels map to +score/-score/0.
     """
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
     try:
         news_items = yf.Ticker(ticker).news
 
@@ -452,12 +563,15 @@ def get_news_sentiment(ticker: str, sentiment_model) -> float | None:
             return None
 
         headlines = []
-        for article in news_items[:NEWS_ARTICLES_PER_TICKER]:
-            # yfinance returns news in two possible formats depending on version
-            if "content" in article and "title" in article.get("content", {}):
-                headlines.append(article["content"]["title"])
-            elif "title" in article:
-                headlines.append(article["title"])
+        for article in news_items:
+            title, age_days = _headline_and_age(article, now)
+            if not title:
+                continue
+            if age_days is not None and age_days > NEWS_MAX_AGE_DAYS:
+                continue
+            headlines.append(title)
+            if len(headlines) == NEWS_ARTICLES_PER_TICKER:
+                break
 
         if not headlines:
             return None
@@ -483,17 +597,23 @@ def get_news_sentiment(ticker: str, sentiment_model) -> float | None:
 # STEP 5: PIPELINE ORCHESTRATION
 # =============================================================================
 
-def run_pipeline(tickers_limit: int | None = None, skip_sentiment: bool = False) -> pd.DataFrame:
+class PipelineOutput(NamedTuple):
+    leaderboard: pd.DataFrame       # Ticker, Close, Confidence, Sentiment_Score, Signal_Pool
+    candidate_prices: pd.DataFrame  # PRICE_HISTORY_DAYS of adjusted closes per candidate
+
+
+def run_pipeline(tickers_limit: int | None = None, skip_sentiment: bool = False) -> PipelineOutput:
     """
-    Runs the full two-stage pipeline and returns the leaderboard DataFrame
-    with columns [Ticker, Close, Confidence, Sentiment_Score], sorted by
+    Runs the full two-stage pipeline. The leaderboard has columns
+    [Ticker, Close, Confidence, Sentiment_Score, Signal_Pool], sorted by
     Confidence descending. Missing sentiment is NaN (rendered as a blank
     field in the CSV), never silently coerced to 0.
     """
-    train_df, latest_df = build_dataset(tickers_limit=tickers_limit)
+    train_df, latest_df, master_df = build_dataset(tickers_limit=tickers_limit)
 
     print("Training XGBoost model...")
     model = train_model(train_df)
+    print(f"  {model.get_params()['n_estimators']} boosting rounds (chosen by early stopping)")
 
     focus_list = score_and_rank(model, latest_df)
 
@@ -515,11 +635,12 @@ def run_pipeline(tickers_limit: int | None = None, skip_sentiment: bool = False)
     focus_list["Confidence"] = (focus_list["Probability"] * 100).round(2)
 
     leaderboard = (
-        focus_list[["Ticker", "Close", "Confidence", "Sentiment_Score"]]
+        focus_list[["Ticker", "Close", "Confidence", "Sentiment_Score", "Signal_Pool"]]
         .sort_values("Confidence", ascending=False)
         .reset_index(drop=True)
     )
-    return leaderboard
+    prices = candidate_price_history(master_df, leaderboard["Ticker"].tolist())
+    return PipelineOutput(leaderboard, prices)
 
 
 # =============================================================================
@@ -563,8 +684,10 @@ def print_results(leaderboard: pd.DataFrame) -> None:
 
     print(f"\n{separator}")
     print("Interpretation guide:")
-    print(f"  LONG:  Confidence > {LONG_CONFIDENCE_PCT:.0f}%  AND  Sentiment > 0  ->  bullish confluence")
-    print(f"  SHORT: Confidence < {SHORT_CONFIDENCE_PCT:.0f}%  AND  Sentiment < 0  ->  bearish confluence")
+    print(f"  LONG:  in the top-{TOP_N_CANDIDATES} pool  AND  Sentiment > 0  ->  bullish confluence")
+    print(f"  SHORT: in the bottom-{BOTTOM_N_CANDIDATES} pool  AND  Sentiment < 0  ->  bearish confluence")
+    print("  Confidence is the model's probability that +4% is hit before -4% within 5 days;")
+    print("  compare it with the ~25-30% base rate, not with 50%.")
     print(separator)
 
 
@@ -596,8 +719,8 @@ def quiet_third_party_warnings() -> None:
 def main() -> None:
     quiet_third_party_warnings()
     args = parse_args()
-    leaderboard = run_pipeline(tickers_limit=args.tickers_limit, skip_sentiment=args.skip_sentiment)
-    print_results(leaderboard)
+    output = run_pipeline(tickers_limit=args.tickers_limit, skip_sentiment=args.skip_sentiment)
+    print_results(output.leaderboard)
 
 
 if __name__ == "__main__":
