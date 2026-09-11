@@ -65,6 +65,10 @@ The dashboard's risk tab simulates thousands of future paths for an equal-weight
 
 ## Validation
 
+> [!NOTE]
+> A companion module, [`alpha/`](alpha/README.md), tests whether these predictions are *tradeable* rather than merely accurate. It is worth reading before quoting anything below: its conclusion is that they are not, and it measures what survivorship bias and configuration search are each worth to the numbers in this section.
+
+
 The classifier is evaluated with **expanding-window walk-forward validation** (`evaluate.py`): seven folds with calendar-year test blocks from 2020 to a partial 2026, each retraining the production model from scratch on all data up to that fold. Because the label looks 5 trading days ahead, the last 5 trading days before each test block are purged from training; features are strictly backward-looking, which an automated causality check enforces. Two leakage canaries back this up: training on permuted labels gives a test AUC of 0.52 (chance), and removing the purge produces no measurable advantage on the earliest test days.
 
 Headline out-of-sample results (2026-07-03 data snapshot, 503 tickers, 806,246 test rows over 1,630 test days; all figures computed by `evaluate.py` and stored in [`data/validation_metrics.json`](data/validation_metrics.json)):
@@ -106,8 +110,8 @@ Interpretation thresholds used by the screener:
 
 Read these before quoting any number above; the validation caveats among them also ship inside `data/validation_metrics.json`, so the dashboard cannot display the metrics without them.
 
-- **Survivorship bias.** The universe is the current S&P 500 membership scraped from Wikipedia and applied back to 2015. Companies that were removed from the index along the way are missing, which inflates measured hit rates. Historical constituent lists are not freely available, so this is documented rather than corrected.
-- **No transaction costs or portfolio backtest.** The validation measures per-prediction classifier quality, not tradeable returns. No costs, slippage, sizing or capacity effects are modelled.
+- **Survivorship bias — measured.** The universe above is the current S&P 500 membership scraped from Wikipedia and applied back to 2015, so companies removed along the way are missing. This was previously documented as uncorrectable; that was wrong, and it has now been measured. Rebuilding the same features and labels on CRSP data with the index's actual daily membership, the bias is worth **1.3 points of precision@15 and 1.2 points of excess over base rate** (46.6% → 45.3%, +17.9 → +16.7 points; 95% CIs [16.2, 19.4] and [15.1, 18.2], which overlap). It is smaller than expected because a long-only top-15 statistic is inflated by survivorship only when the missing names would have been *picked*, and removed names are usually declining stocks the classifier already ranks low. See [`alpha/pit_screener.py`](alpha/pit_screener.py).
+- **No transaction costs or portfolio backtest** *in the figures above*. They measure per-prediction classifier quality, not tradeable returns. The [`alpha/`](alpha/README.md) module addresses this separately and its answer is negative: once predictions are turned into a dollar-neutral book and charged realistic costs, no configuration survives correction for the search that found it (deflated Sharpe 0.736 against a 0.95 bar, on survivorship-free CRSP data). Ranking quality and tradeable edge are different claims, and only the first is supported here.
 - **Data quality.** Prices are a single yfinance snapshot with auto-adjustment applied at download time; adjusted history can differ from what was observable in real time, and delisted tickers are absent.
 - **Label conventions.** "Neither barrier hit" and "both barriers hit on the same bar" both map to label 0, so the class balance depends on the volatility regime (daily base rates ranged from 24.7% to 37.3% across test years). A low predicted probability is therefore not a symmetric short signal.
 - **Overlapping labels.** Consecutive test days share 5-day label windows and are not independent; the confidence interval above uses a moving-block bootstrap with block length 5.
