@@ -278,11 +278,33 @@ Selection bias makes results look **better**, so findings that are negative or p
 What does **not** stand is the claim that any configuration here is a tradeable edge.
 
 
+## The pre-registered result (2026-09-11)
+
+Run on **CRSP**, which UCL turned out to license despite it appearing nowhere on the library's pages — the protocol picked the source by query-test rather than by documentation, which is the only reason we found it.
+
+All four gates passed, point-in-time coverage exact at 1.000 (736 price series against 736 permnos ever in the index), decomposition exact to 3.3e-16, delisting returns applied to 127 observations.
+
+| test | result | predicted in advance | |
+| ---- | ------------------------------------- | -------------------- | ---- |
+| **A** LPS Panel A replication | −0.90%/mo, t = −4.04 | pass, below −1.02% | **PASS** |
+| **B** value of the delisted half | Δ −0.104 bps/side, CI [−0.615, +0.290] | −0.10 to −0.45 | — |
+| **C** deflated Sharpe | 0.736 at N=108 | fail | **FAIL** |
+
+**Test B is the finding: the delisted half of survivorship bias is worth approximately nothing here.** Break-even is 1.57 bps/side on survivor-only data and 1.57 on survivorship-free data, and the paired difference cannot be distinguished from zero.
+
+That inverts the usual warning, for a structural reason. Survivorship bias is severe for long-only strategies, where the missing names are failures you would have held to the end. This book is dollar-neutral and decile-weighted, so 159 recovered names entering a 510-name daily cross-section dilute rather than dominate. The half that mattered was **pre-inclusion** history, which the baseline already corrected.
+
+Test C failing is the durable conclusion of the whole module: with clean data, real delisting returns and genuine index membership, the strategy still does not survive correction for the search that found it.
+
+**Limitation:** UCL's CRSP licence ends 2024-12-31, so the confirmatory arm covers 2020–2024 against the baseline's 2020–2026. Test B is paired on the 1,257 common days; nothing here speaks to 2025 or 2026.
+
+
 ## Limitations
 
 These inherit the root README's limitations and add two.
 
-- **Survivorship bias — partly corrected.** `constituents.py` gives genuine point-in-time membership, which removes pre-inclusion history and costs ~25% of measured performance. The other half is not fixable with free data: Yahoo serves no history for delisted tickers, so 276 of 784 true members (36%) are simply absent, and they are disproportionately losers. Fully fixing this needs CRSP (via WRDS, which UCL may provide) or a paid survivorship-bias-free feed such as Sharadar SEP.
+- **Survivorship bias — now measured, not just corrected.** The pre-registered CRSP test puts the delisted half at −0.104 bps/side with a CI spanning zero. What follows describes the pre-CRSP state.
+- **Survivorship bias — partly corrected (pre-CRSP).** `constituents.py` gives genuine point-in-time membership, which removes pre-inclusion history and costs ~25% of measured performance. The other half is not fixable with free data: Yahoo serves no history for delisted tickers, so 276 of 784 true members (36%) are simply absent, and they are disproportionately losers. Fully fixing this needs CRSP (via WRDS, which UCL may provide) or a paid survivorship-bias-free feed such as Sharadar SEP.
 - **The small-cap extension is more survivorship-biased, not less.** It is drawn from currently-listed SEC tickers, and small-cap delisting rates are several times large-cap ones.
 - **Raw open prices.** LPS use a first-half-hour VWAP specifically because the raw open can be set by very small orders. We use the raw open and test the resulting artefact directly rather than avoiding it.
 - **Cost model is a constant per unit traded.** No market impact, no spread that widens with size, no borrow cost on the short leg.

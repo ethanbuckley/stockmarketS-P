@@ -115,3 +115,59 @@ Run with `ALPHA_SOURCE=yfinance python3 alpha/preregistered.py baseline`. Stored
 Both predictions recorded above held: Test A passes with a magnitude smaller than the survivor-biased −1.02%/mo, and Test C fails.
 
 Note the ticker count is 577, not the 499 quoted elsewhere in the README. The small-cap download recovered former index members that were *removed from the index but are still listed*; those are not delisted and Yahoo still serves them. The genuinely missing population is narrower than 276, and Test B will measure what that narrower population is worth.
+
+---
+
+# Results (2026-09-11)
+
+Source: **CRSP** (`crsp.dsf`), as the pre-registration mandates where entitled. UCL turned out to license CRSP despite it appearing nowhere on the library's pages, which is why the protocol picked the source by query-test rather than by documentation.
+
+Using CRSP also let the decomposition follow LPS's own definition (p.196) instead of reconstructing it from adjusted prices:
+
+```
+r_intraday  = Close / Open - 1
+r_overnight = (1 + r_close_to_close) / (1 + r_intraday) - 1
+```
+
+`crsp.dsf.ret` is a total return including dividends, and merged with `crsp.dsedelist` it includes the delisting return, so the identity holds by construction (max error 3.3e-16) and corporate actions land in the overnight leg exactly as the paper assumes. Delisting returns were applied to **127** observations. Identity is `permno`, not ticker, because tickers are reused after a delisting.
+
+### Gates
+
+| gate | value | |
+| ------------------------ | ------ | ---- |
+| decomposition identity | 3.3e-16 | PASS |
+| names per day | 510 | PASS |
+| point-in-time coverage | **1.000** | PASS |
+| delisted tickers present | 736 | PASS |
+
+Coverage is exact: 736 price series against 736 permnos ever in the index.
+
+### The three tests
+
+| | result | predicted | |
+| ------ | ------------------------------------ | --------- | ---- |
+| **A** | −0.90%/mo, t = **−4.04** | pass, magnitude below −1.02% | **PASS** |
+| **B** | Δ = **−0.104** bps/side, 95% CI **[−0.615, +0.290]** | −0.10 to −0.45 | — |
+| **C** | DSR@N=108 = **0.736** (N=2: 0.996) | fail | **FAIL** |
+
+Frozen configuration on survivorship-free data: 1,257 days, 736 tickers, 510 names/day, IC 0.0204 (t = 3.49), gross 3.138 bps/day, Sharpe 1.40, **break-even 1.57 bps/side**.
+
+### What Test B says
+
+**The delisted half of survivorship bias is worth approximately nothing.** Break-even is 1.57 bps/side in both arms. The paired difference is −0.104 with a confidence interval spanning zero, so it is not distinguishable from no effect at all. My predicted range was −0.10 to −0.45; the point estimate sits on its boundary, but the interval is what matters and it does not exclude zero.
+
+That is the opposite of the received wisdom, and the reason is structural. Survivorship bias is punishing for long-only strategies, where the missing names are the failures you would have held. This book is dollar-neutral and decile-weighted: the 159 extra names enter a 510-name daily cross-section, mostly on one side, and dilute rather than dominate. The correction that actually mattered was the **pre-inclusion** half — not using a company's history from before it joined the index — and the baseline already carried it.
+
+### Limitation
+
+UCL's CRSP licence ends **2024-12-31**, so the confirmatory arm covers 2020-01-02 to 2024-12-30 while the yfinance baseline runs to 2026-09-03. Test B is paired on the 1,257 common days, so the comparison is valid, but nothing here speaks to 2025 or 2026.
+
+### Amendment log, continued
+
+### Amendment 2 — 2026-09-11, before any test statistic was computed
+
+**Change.** The CRSP price query applies no share-code or exchange filter.
+
+**Reason.** The first confirmatory run failed the point-in-time coverage gate at 0.886. The cause was a `shrcd in (10,11)` screen in the CRSP query, which is the conventional US-common-stock filter and is wrong here: it deletes 51 foreign-incorporated members (Linde, Medtronic, Aon) and 38 REITs (Simon Property, Prologis, American Tower), all of which are genuine S&P 500 constituents. The frozen universe is "point-in-time S&P 500 members", and membership *is* the definition, so any further screen contradicts it.
+
+**Why this is not result-driven.** The gate fired before any test ran, which is what gates are for. The filter was never part of the frozen configuration: the CRSP path did not exist when the protocol was frozen, because entitlement was unknown. Removing it took coverage from 0.886 to 1.000. No threshold was changed.

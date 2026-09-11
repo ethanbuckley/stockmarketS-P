@@ -136,6 +136,17 @@ def probe(db) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def has_crsp(db) -> bool:
+    """Query-tested, not assumed: the pre-registration picks the source on
+    entitlement, and WRDS lists products it does not grant."""
+    try:
+        raw_sql(db, "select permno from crsp.dsf limit 1")
+        return True
+    except Exception:
+        db.rollback()
+        return False
+
+
 def sp500_gvkeyx(db) -> str:
     """Find the S&P 500 index id by NAME rather than hardcoding it."""
     idx = raw_sql(db, "select gvkeyx, conm from comp.idx_index")
@@ -211,6 +222,138 @@ def membership_to_panel(raw: pd.DataFrame, freq: str = "QE") -> pd.DataFrame:
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=["asof", "Ticker"])
 
 
+# -------------------------------------------------------------------- CRSP
+# The pre-registration mandates CRSP where entitled, because it carries true
+# delisting returns. It also lets us use LPS's OWN definition of the overnight
+# leg (p.196) rather than reconstructing it from adjusted prices:
+#
+#     r_intraday,s  = Close_s / Open_s - 1
+#     r_overnight,s = (1 + r_close_to_close,s) / (1 + r_intraday,s) - 1
+#
+# crsp.dsf.ret is a total return including dividends, and merged with
+# crsp.dsedelist it includes the delisting return. So the identity
+# (1+overnight)(1+intraday) = (1+cc) holds by construction, and dividends and
+# corporate actions land in the overnight leg, which is what the paper assumes.
+#
+# Identity is permno, not ticker. Tickers are reused after a delisting, which
+# would silently graft one company's history onto another - exactly the error
+# this whole exercise exists to remove.
+# NO share-code or exchange filter. The frozen universe is "point-in-time
+# S&P 500 members", and membership IS the definition -- filtering it further
+# deletes real constituents. The usual shrcd in (10,11) screen drops 51
+# foreign-incorporated members (shrcd 12: Linde, Medtronic, Aon) and 38 REITs
+# (shrcd 18: Simon Property, Prologis, American Tower), which is what failed
+# the point-in-time coverage gate at 0.886 on the first attempt.
+
+
+def crsp_sp500_permnos(db, start: str) -> str:
+    """Permnos ever in the S&P 500 since `start`, as a SQL list. We pull their
+    FULL history, not just their member-days, because the frozen feature set
+    needs trailing windows before a name enters the index."""
+    q = f"""select distinct permno from crsp.dsp500list
+            where ending >= '{start}' or ending is null"""
+    ids = raw_sql(db, q)["permno"].astype(int).tolist()
+    if not ids:
+        raise RuntimeError("crsp.dsp500list returned no permnos")
+    print(f"  {len(ids)} permnos ever in the S&P 500 since {start}")
+    return ",".join(str(i) for i in ids)
+
+
+def pull_prices_crsp(db, start="2014-12-01", end=None) -> pd.DataFrame:
+    end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
+    permnos = crsp_sp500_permnos(db, start)
+    q = f"""
+        select d.permno, d.date, d.openprc, d.prc, d.askhi, d.bidlo, d.vol,
+               d.ret, d.cfacpr, n.ticker, n.shrcd, n.exchcd
+        from crsp.dsf as d
+        join crsp.dsenames as n
+          on n.permno = d.permno
+         and d.date between n.namedt and coalesce(n.nameendt, date '2099-12-31')
+        where d.permno in ({permnos})
+          and d.date between '{start}' and '{end}'
+          and d.prc is not null
+          and d.openprc is not null
+    """
+    print("  querying crsp.dsf ...", flush=True)
+    raw = raw_sql(db, q)
+    dl = raw_sql(db, f"""select permno, dlstdt, dlret from crsp.dsedelist
+                         where permno in ({permnos}) and dlret is not null""")
+    return to_panel_crsp(raw, dl)
+
+
+def to_panel_crsp(raw: pd.DataFrame, delist: pd.DataFrame) -> pd.DataFrame:
+    df = raw.copy()
+    df["Date"] = pd.to_datetime(df["date"]).astype("datetime64[ns]")
+    for c in ("openprc", "prc", "askhi", "bidlo", "vol", "ret", "cfacpr"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # A NEGATIVE prc is CRSP's flag for a bid/ask midpoint, i.e. no trade that
+    # day. Take the magnitude (standard practice) and record how many.
+    df["no_trade"] = df["prc"] < 0
+    for c in ("prc", "openprc", "askhi", "bidlo"):
+        df[c] = df[c].abs()
+    df = df[(df["prc"] > 0) & (df["openprc"] > 0) & (df["ret"].notna())]
+
+    # apply the delisting return on the delisting date
+    if len(delist):
+        d = delist.copy()
+        d["Date"] = pd.to_datetime(d["dlstdt"]).astype("datetime64[ns]")
+        d["dlret"] = pd.to_numeric(d["dlret"], errors="coerce")
+        df = df.merge(d[["permno", "Date", "dlret"]], on=["permno", "Date"], how="left")
+        hit = df["dlret"].notna()
+        df.loc[hit, "ret"] = (1 + df.loc[hit, "ret"]) * (1 + df.loc[hit, "dlret"]) - 1
+        print(f"  delisting returns applied to {int(hit.sum())} observations")
+
+    df["Ticker"] = df["permno"].astype(int).astype(str)     # identity is permno
+    df["ticker_label"] = df["ticker"]
+    df = (df.sort_values(["Ticker", "Date"])
+            .drop_duplicates(["Ticker", "Date"], keep="last").reset_index(drop=True))
+
+    # LPS's own decomposition
+    df["r_cc"] = df["ret"]
+    df["r_intraday"] = df["prc"] / df["openprc"] - 1
+    df["r_overnight"] = (1 + df["r_cc"]) / (1 + df["r_intraday"]) - 1
+
+    # a return needs the previous trading day to exist for that permno
+    cal = pd.Index(sorted(df["Date"].unique()))
+    pos = pd.Series(np.arange(len(cal)), index=cal)
+    dpos = df["Date"].map(pos)
+    contiguous = (dpos - dpos.groupby(df["Ticker"]).shift(1)) == 1
+    df.loc[~contiguous, ["r_cc", "r_overnight"]] = np.nan
+
+    df["Close"] = df["prc"] / df["cfacpr"]
+    df["Open"] = df["openprc"] / df["cfacpr"]
+    df["High"] = df["askhi"] / df["cfacpr"]
+    df["Low"] = df["bidlo"] / df["cfacpr"]
+    df["Volume"] = df["vol"]
+
+    chk = ((1 + df["r_overnight"]) * (1 + df["r_intraday"]) - 1 - df["r_cc"]).abs()
+    df.attrs["max_decomposition_error"] = float(chk.max()) if chk.notna().any() else 0.0
+    df.attrs["no_trade_share"] = float(df["no_trade"].mean())
+    keep = ["Date", "Ticker", "ticker_label", "Open", "High", "Low", "Close",
+            "Volume", "r_cc", "r_intraday", "r_overnight", "permno"]
+    return df[keep]
+
+
+def pull_constituents_crsp(db, start: str = "2014-12-01", freq: str = "D") -> pd.DataFrame:
+    """crsp.dsp500list gives exact membership spans, so point-in-time
+    membership is daily and real rather than a quarterly reconstruction.
+
+    dsp500list covers the index's whole history, so the spans are clipped to
+    `start` before expanding; without that it emits ~36k daily snapshots back
+    to the 1920s, none of which the analysis window can use.
+    """
+    q = """select permno, start as "from", ending as thru from crsp.dsp500list"""
+    m = raw_sql(db, q)
+    m["Ticker"] = m["permno"].astype(int).astype(str)
+    m["from"] = pd.to_datetime(m["from"]).astype("datetime64[ns]")
+    m["thru"] = pd.to_datetime(m["thru"]).astype("datetime64[ns]")
+    lo = pd.Timestamp(start)
+    m = m[m["thru"].isna() | (m["thru"] >= lo)]
+    m["from"] = m["from"].clip(lower=lo)
+    return membership_to_panel(m, freq=freq)
+
+
 # ------------------------------------------------------------------- pulls
 def pull_prices(db, start="2014-12-01", end=None) -> pd.DataFrame:
     end = end or pd.Timestamp.today().strftime("%Y-%m-%d")
@@ -253,13 +396,20 @@ if __name__ == "__main__":
             if a.cmd == "probe":
                 sys.exit(0)
         if a.cmd in ("prices", "all"):
-            p = pull_prices(db, a.start)
+            if has_crsp(db):
+                print("CRSP entitled -> using crsp.dsf (PREREGISTRATION.md)")
+                p = pull_prices_crsp(db, a.start)
+                print(f"  bid/ask-midpoint closes: {p.attrs['no_trade_share']:.2%}")
+            else:
+                print("CRSP not entitled -> falling back to comp.secd")
+                p = pull_prices(db, a.start)
             p.to_parquet(PRICES_OUT, index=False)
             print(f"prices: rows={len(p):,} tickers={p.Ticker.nunique():,} "
                   f"decomposition error={p.attrs['max_decomposition_error']:.1e}")
             print(f"wrote {PRICES_OUT}")
         if a.cmd in ("constituents", "all"):
-            m = pull_constituents(db, sp500_gvkeyx(db))
+            m = (pull_constituents_crsp(db) if has_crsp(db)
+                 else pull_constituents(db, sp500_gvkeyx(db)))
             m.to_parquet(MEMB_OUT, index=False)
             n = m.groupby("asof")["Ticker"].size()
             print(f"membership: snapshots={n.size} members {n.min()}-{n.max()} "
