@@ -4,14 +4,20 @@ Runs the whole script headlessly. It would have caught the st.stop() bug
 that blanked the Validation tab whenever the Monte Carlo selection was empty.
 """
 
+from pathlib import Path
+
 import pytest
 
 st_testing = pytest.importorskip("streamlit.testing.v1")
 
+# Absolute path: newer Streamlit resolves relative paths against this test
+# file rather than the working directory.
+APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
+
 
 @pytest.fixture(scope="module")
 def app():
-    at = st_testing.AppTest.from_file("app.py", default_timeout=120)
+    at = st_testing.AppTest.from_file(str(APP_PATH), default_timeout=120)
     at.run()
     return at
 
