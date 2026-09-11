@@ -8,3 +8,6 @@ venv/
 .DS_Store
 # Local dataset cache written by evaluate.py --cache; never commit
 master_cache.pkl
+
+# Unrelated project checked out alongside this one
+alpha/

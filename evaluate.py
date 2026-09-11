@@ -42,44 +42,65 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from screener import (
+from config import (
     BOTTOM_N_CANDIDATES,
+    DATA_DIR,
     DATA_START_DATE,
+    EARLY_STOPPING_ROUNDS,
+    EARLY_STOPPING_VALIDATION_FRACTION,
     FEATURE_COLUMNS,
     FORWARD_WINDOW_DAYS,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     TOP_N_CANDIDATES,
+    VALIDATION_CALIBRATION_PATH,
+    VALIDATION_DAILY_PATH,
+    VALIDATION_METRICS_PATH,
     XGB_PARAMS,
-    build_master_dataframe,
-    build_technical_features,
-    train_model,
 )
+from screener import build_master_dataframe, build_technical_features, train_model
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-METRICS_PATH = os.path.join(DATA_DIR, "validation_metrics.json")
-DAILY_PATH = os.path.join(DATA_DIR, "validation_daily.csv")
-CALIBRATION_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
+METRICS_PATH = VALIDATION_METRICS_PATH
+DAILY_PATH = VALIDATION_DAILY_PATH
+CALIBRATION_PATH = VALIDATION_CALIBRATION_PATH
 
-SCHEMA_VERSION = 1
+# Bumped when the artefact layout or the meaning of a recorded number
+# changes. 2: join-date truncation of the universe, early-stopped tree
+# count per fold, volume no longer forward-filled.
+SCHEMA_VERSION = 2
+
+
+def _roc_auc(y, p) -> float:
+    """ROC AUC via scikit-learn, imported lazily so importing this module
+    (tests, the dashboard's docs) does not require sklearn."""
+    from sklearn.metrics import roc_auc_score
+
+    return float(roc_auc_score(y, p))
+
 
 # Features computed by build_technical_features from a single ticker's OHLCV.
 # The remaining FEATURE_COLUMNS are macro pct_changes/shifts, causal by
 # construction; rolling/ewm windows checked here are the only nontrivial
 # windowing in the pipeline.
 TECHNICAL_FEATURES = [
-    "RSI", "MACD", "BB_Position", "Price_to_VWAP",
-    "ATR_Ratio", "Return", "Volume_Surge", "Day_Of_Week",
+    "RSI",
+    "MACD",
+    "BB_Position",
+    "Price_to_VWAP",
+    "ATR_Ratio",
+    "Return",
+    "Volume_Surge",
+    "Day_Of_Week",
 ]
 
 # Wording is shipped inside the same artefact as the numbers, so the app and
 # README cannot quote a metric without its caveats travelling with it.
 CAVEATS = [
-    "Survivorship bias: the universe is today's S&P 500 constituents applied "
-    "retroactively to the full 2015+ history. Stocks removed from the index "
-    "along the way are absent, which biases measured hit rates upward. "
-    "Historical constituent lists are not freely available, so this is "
-    "documented rather than corrected.",
+    "Survivorship bias: the universe is today's S&P 500 constituents. Each "
+    "ticker enters the panel only from the date it joined the index (taken "
+    "from the Wikipedia constituents table), so no pre-membership history is "
+    "used; but companies removed from the index since 2015 are absent, and "
+    "that half of the bias still inflates measured hit rates.",
     "Prices are a single yfinance snapshot with auto-adjustment applied at "
     "download time; adjusted history can differ slightly from what was "
     "observable in real time.",
@@ -98,10 +119,11 @@ CAVEATS = [
 # FOLDS AND LEAKAGE CONTROL
 # =============================================================================
 
+
 @dataclass(frozen=True)
 class Fold:
     fold_id: int
-    train_end: pd.Timestamp   # last usable training date, after the purge
+    train_end: pd.Timestamp  # last usable training date, after the purge
     test_start: pd.Timestamp
     test_end: pd.Timestamp
     partial: bool
@@ -134,10 +156,7 @@ def make_folds(
         test_start, test_end = test_dates[0], test_dates[-1]
         pos = int(cal.searchsorted(test_start))
         if pos - purge_days - 1 < 0:
-            raise ValueError(
-                f"Not enough history before {year} to train after a "
-                f"{purge_days}-day purge."
-            )
+            raise ValueError(f"Not enough history before {year} to train after a {purge_days}-day purge.")
         fold_id += 1
         folds.append(
             Fold(
@@ -153,9 +172,7 @@ def make_folds(
     return folds
 
 
-def split_fold(
-    valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_fold(valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Splits the filtered (complete features + valid label) frame into the
     fold's train and test sets, and asserts the purge gap held.
@@ -171,20 +188,15 @@ def split_fold(
     train_max_pos = int(cal.searchsorted(train.index.max()))
     test_min_pos = int(cal.searchsorted(test.index.min()))
     assert train_max_pos + FORWARD_WINDOW_DAYS < test_min_pos, (
-        f"Fold {fold.fold_id}: purge violated "
-        f"(train ends at position {train_max_pos}, test starts at {test_min_pos})."
+        f"Fold {fold.fold_id}: purge violated (train ends at position {train_max_pos}, test starts at {test_min_pos})."
     )
     return train, test
 
 
-def reconcile_rows(
-    valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int
-) -> None:
+def reconcile_rows(valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int) -> None:
     """Accounts for every filtered row: train + purged + test + outside."""
     n_total = len(valid_df)
-    n_purged = int(
-        ((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum()
-    )
+    n_purged = int(((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum())
     n_outside = int((valid_df.index > fold.test_end).sum())
     assert n_train + n_purged + n_test + n_outside == n_total, (
         f"Fold {fold.fold_id}: row reconciliation failed "
@@ -209,9 +221,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 
     for ticker in chosen:
         sub = (
-            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]]
-            .dropna(subset=["Close"])
-            .copy()
+            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]].dropna(subset=["Close"]).copy()
         )
         cut_pos = int(rng.integers(40, len(sub)))
         cutoff = sub.index[cut_pos]
@@ -231,6 +241,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 # =============================================================================
 # METRICS
 # =============================================================================
+
 
 def daily_cross_sectional_metrics(
     day_df: pd.DataFrame,
@@ -348,10 +359,13 @@ def daily_aggregates(daily: pd.DataFrame, seed: int = 42) -> dict:
     }
 
 
-def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    """Scores one fold's test set: per-day metrics, fold summary, calibration."""
-    from sklearn.metrics import roc_auc_score
+def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame, np.ndarray]:
+    """Scores one fold's test set.
 
+    Returns (daily metrics, fold summary, calibration bins, p_hat), where
+    p_hat is the test-row prediction vector in test_df order so the caller
+    can pool it without predicting a second time.
+    """
     test_df = test_df.copy()
     test_df["p_hat"] = model.predict_proba(test_df[FEATURE_COLUMNS])[:, 1]
 
@@ -367,7 +381,7 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
     p = test_df["p_hat"].to_numpy()
     summary = {
         "fold_id": fold.fold_id,
-        "roc_auc": float(roc_auc_score(y, p)),
+        "roc_auc": _roc_auc(y, p),
         "brier": float(np.mean((p - y) ** 2)),
         "base_rate": float(y.mean()),
         "n_test_rows": int(len(y)),
@@ -376,12 +390,13 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
 
     calib = reliability_bins(y, p)
     calib.insert(0, "fold_id", str(fold.fold_id))
-    return daily, summary, calib
+    return daily, summary, calib, p
 
 
 # =============================================================================
 # EVALUATION DRIVER
 # =============================================================================
+
 
 def run_evaluation(
     master_df: pd.DataFrame,
@@ -397,8 +412,6 @@ def run_evaluation(
     Returns (results, daily_df, calibration_df); results holds the fold
     table plus per-fold, pooled and overall-daily metrics.
     """
-    from sklearn.metrics import roc_auc_score
-
     cal = master_df.index.unique().sort_values()
     if causality_check:
         feature_causality_check(master_df, seed=seed)
@@ -422,11 +435,9 @@ def run_evaluation(
 
         # Train-vs-test generalisation gap (console evidence only): a
         # near-zero gap would suggest test rows contaminated the pool.
-        train_auc = float(
-            roc_auc_score(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
-        )
+        train_auc = _roc_auc(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
 
-        daily, summary, calib = evaluate_fold(model, test, fold)
+        daily, summary, calib, p_hat = evaluate_fold(model, test, fold)
 
         fold_table.append(
             {
@@ -440,6 +451,7 @@ def run_evaluation(
                 "n_test_rows": int(len(test)),
                 "n_test_days": int(daily.shape[0]),
                 "n_tickers_in_test": int(test["Ticker"].nunique()),
+                "n_estimators": int(model.get_params()["n_estimators"]),
                 "partial": fold.partial,
             }
         )
@@ -447,8 +459,7 @@ def run_evaluation(
         all_daily.append(daily)
         all_calib.append(calib)
         pooled_y.append(test["Target"].to_numpy())
-        # Recompute predictions once, reuse for pooling
-        pooled_p.append(model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        pooled_p.append(p_hat)
 
         elapsed = time.perf_counter() - t0
         print(
@@ -456,6 +467,7 @@ def run_evaluation(
             f"{', partial' if fold.partial else ''}): "
             f"train {len(train):,} rows to {train.index.max().date()}, "
             f"test {len(test):,} rows, "
+            f"{model.get_params()['n_estimators']} trees, "
             f"AUC {summary['roc_auc']:.4f} (train {train_auc:.4f}), "
             f"P@15 {summary['precision_top15_mean']:.3f} "
             f"vs base {summary['base_rate_daily_mean']:.3f} "
@@ -471,8 +483,16 @@ def run_evaluation(
     overall_daily = daily_aggregates(daily_all, seed=seed)
     # Lean CSV schema; excess_bottom5 is derivable as base_rate - bottom5_pos_rate
     daily_df = daily_all[
-        ["date", "fold_id", "n_candidates", "base_rate", "precision_top15",
-         "excess_top15", "bottom5_pos_rate", "top_decile_lift"]
+        [
+            "date",
+            "fold_id",
+            "n_candidates",
+            "base_rate",
+            "precision_top15",
+            "excess_top15",
+            "bottom5_pos_rate",
+            "top_decile_lift",
+        ]
     ]
 
     y_pooled = np.concatenate(pooled_y)
@@ -485,7 +505,7 @@ def run_evaluation(
         "folds": fold_table,
         "per_fold": per_fold,
         "pooled": {
-            "roc_auc": float(roc_auc_score(y_pooled, p_pooled)),
+            "roc_auc": _roc_auc(y_pooled, p_pooled),
             "brier": float(np.mean((p_pooled - y_pooled) ** 2)),
             "base_rate": float(y_pooled.mean()),
             "n_rows": int(len(y_pooled)),
@@ -496,22 +516,34 @@ def run_evaluation(
     return results, daily_df, calib_df
 
 
-def _shuffled_target_test(train: pd.DataFrame, test: pd.DataFrame, seed: int = 42) -> None:
+def _shuffled_target_test(
+    train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, n_permutations: int = 5
+) -> list[float]:
     """
-    Leakage canary: refit fold 1 with permuted training labels. If the test
-    AUC lands away from 0.5, information reaches the test set through
-    something other than the labels.
-    """
-    from sklearn.metrics import roc_auc_score
+    Leakage canary: refit fold 1 with permuted training labels and score the
+    real test labels. Information reaching the test set through anything
+    other than the labels would push these AUCs *above* 0.5.
 
-    print("Running shuffled-target leakage check (refits fold 1)...")
-    rng = np.random.default_rng(seed)
-    shuffled = train.copy()
-    shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
-    model = train_model(shuffled)
-    auc = float(roc_auc_score(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1]))
-    verdict = "OK" if 0.48 <= auc <= 0.52 else "WARNING: investigate before publishing"
-    print(f"  Shuffled-target test AUC = {auc:.4f} (expected ~0.5): {verdict}")
+    The null distribution is wider than the row count suggests. Macro
+    features (SPY/VIX/TNX changes, day of week) are identical for every
+    ticker on a given day, so a noise-fit model's predictions move together
+    across the whole cross-section and the effective sample is the number of
+    test days, not test rows. A single permutation can land at 0.46 or 0.53
+    by chance, so several are run and only the upper tail is a warning.
+    """
+    print(f"Running shuffled-target leakage check ({n_permutations} permutations, refits fold 1)...")
+    aucs = []
+    for i in range(n_permutations):
+        rng = np.random.default_rng(seed + i)
+        shuffled = train.copy()
+        shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
+        model = train_model(shuffled)
+        auc = _roc_auc(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        aucs.append(auc)
+        print(f"  permutation {i + 1}: {model.get_params()['n_estimators']} trees, test AUC {auc:.4f}")
+    verdict = "OK" if max(aucs) <= 0.55 else "WARNING: investigate before publishing"
+    print(f"  Shuffled-target AUC range {min(aucs):.4f} to {max(aucs):.4f} (real labels ~0.65): {verdict}")
+    return aucs
 
 
 def _purge_ablation_test(
@@ -526,8 +558,6 @@ def _purge_ablation_test(
     purge and compare AUC on the first 10 test days. Console evidence only,
     never written to the committed artefacts.
     """
-    from sklearn.metrics import roc_auc_score
-
     print("Running purge-ablation check (refits fold 1 without the purge)...")
     pos = int(cal.searchsorted(fold.test_start))
     unpurged_train = valid_df[valid_df.index <= cal[pos - 1]]
@@ -536,8 +566,8 @@ def _purge_ablation_test(
     first_days = test.index.unique().sort_values()[:10]
     early = test[test.index.isin(first_days)]
     y = early["Target"].to_numpy()
-    auc_unpurged = float(roc_auc_score(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
-    auc_purged = float(roc_auc_score(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
+    auc_unpurged = _roc_auc(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
+    auc_purged = _roc_auc(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
     print(
         f"  First 10 test days: purged AUC {auc_purged:.4f}, "
         f"unpurged AUC {auc_unpurged:.4f} "
@@ -548,6 +578,7 @@ def _purge_ablation_test(
 # =============================================================================
 # ARTEFACT WRITING
 # =============================================================================
+
 
 def _json_safe(obj):
     """Rounds floats and converts NaN to null so the JSON is strict and stable."""
@@ -564,7 +595,9 @@ def _git_commit() -> str:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
             check=True,
         )
         return out.stdout.strip()
@@ -607,6 +640,7 @@ def write_artefacts(
             "last_price_date": metadata.get("last_price_date"),
             "n_tickers": len(metadata.get("tickers", [])),
             "ticker_source": "Wikipedia S&P 500 constituents as of the download date",
+            "join_date_truncation": metadata.get("join_date_truncation", {"applied": False}),
             "cache_used": cache_used,
             "versions": _library_versions(),
         },
@@ -623,6 +657,14 @@ def write_artefacts(
         "model": {
             "type": "XGBClassifier",
             "params": XGB_PARAMS,
+            "n_estimators_note": (
+                "params.n_estimators is a ceiling. Per fold, the tree count is "
+                "chosen by early stopping on the most recent "
+                f"{EARLY_STOPPING_VALIDATION_FRACTION:.0%} of training dates "
+                f"(purged by {FORWARD_WINDOW_DAYS} days, patience "
+                f"{EARLY_STOPPING_ROUNDS} rounds), then the model is refit on "
+                "all training rows; see validation_scheme.folds[*].n_estimators."
+            ),
             "feature_columns": FEATURE_COLUMNS,
         },
         "validation_scheme": {
@@ -670,29 +712,34 @@ def write_artefacts(
 # MAIN
 # =============================================================================
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Walk-forward validation of the screener's XGBoost classifier."
-    )
+    parser = argparse.ArgumentParser(description="Walk-forward validation of the screener's XGBoost classifier.")
     parser.add_argument(
-        "--first-test-year", type=int, default=2020,
+        "--first-test-year",
+        type=int,
+        default=2020,
         help="first calendar year used as a test block (default 2020)",
     )
     parser.add_argument(
-        "--skip-partial", action="store_true",
+        "--skip-partial",
+        action="store_true",
         help="exclude the final, incomplete calendar year from the folds",
     )
     parser.add_argument(
-        "--cache", metavar="PATH", default=None,
-        help="pickle the labelled master panel here and reuse it on later runs "
-             "(e.g. master_cache.pkl; gitignored)",
+        "--cache",
+        metavar="PATH",
+        default=None,
+        help="pickle the labelled master panel here and reuse it on later runs (e.g. master_cache.pkl; gitignored)",
     )
     parser.add_argument(
-        "--shuffled-target-check", action="store_true",
+        "--shuffled-target-check",
+        action="store_true",
         help="leakage canary: refit fold 1 on permuted labels, expect test AUC ~0.5",
     )
     parser.add_argument(
-        "--purge-ablation", action="store_true",
+        "--purge-ablation",
+        action="store_true",
         help="refit fold 1 without the purge and report the boundary-leakage AUC gap",
     )
     return parser.parse_args(argv)

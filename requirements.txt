@@ -1,5 +1,6 @@
+# Dashboard only (Streamlit Community Cloud). The app reads committed CSV/JSON
+# artefacts and makes no network calls, so yfinance is not needed here.
 streamlit>=1.46
 pandas>=2.0
 plotly>=5.20
 numpy>=1.26
-yfinance>=0.2
