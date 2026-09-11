@@ -371,7 +371,8 @@ def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
             **Stage 1: XGBoost classifier (quantitative signal)**
 
             An XGBoost gradient-boosting model is trained on 10+ years of daily price data
-            across all S&P 500 constituents (~1.3 million observations). The target label uses
+            across all S&P 500 constituents, each from the date it joined the index
+            (over a million labelled stock-days). The target label uses
             the *triple-barrier method*: for each trading day, the model asks whether the stock
             will hit a +4% take-profit *before* it hits a −4% stop-loss within the next 5 trading
             days. This is more realistic than simple N-day forward returns because it mirrors

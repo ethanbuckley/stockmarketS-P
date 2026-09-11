@@ -510,20 +510,34 @@ def run_evaluation(
     return results, daily_df, calib_df
 
 
-def _shuffled_target_test(train: pd.DataFrame, test: pd.DataFrame, seed: int = 42) -> None:
+def _shuffled_target_test(
+    train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, n_permutations: int = 5
+) -> list[float]:
     """
-    Leakage canary: refit fold 1 with permuted training labels. If the test
-    AUC lands away from 0.5, information reaches the test set through
-    something other than the labels.
+    Leakage canary: refit fold 1 with permuted training labels and score the
+    real test labels. Information reaching the test set through anything
+    other than the labels would push these AUCs *above* 0.5.
+
+    The null distribution is wider than the row count suggests. Macro
+    features (SPY/VIX/TNX changes, day of week) are identical for every
+    ticker on a given day, so a noise-fit model's predictions move together
+    across the whole cross-section and the effective sample is the number of
+    test days, not test rows. A single permutation can land at 0.46 or 0.53
+    by chance, so several are run and only the upper tail is a warning.
     """
-    print("Running shuffled-target leakage check (refits fold 1)...")
-    rng = np.random.default_rng(seed)
-    shuffled = train.copy()
-    shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
-    model = train_model(shuffled)
-    auc = _roc_auc(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
-    verdict = "OK" if 0.48 <= auc <= 0.52 else "WARNING: investigate before publishing"
-    print(f"  Shuffled-target test AUC = {auc:.4f} (expected ~0.5): {verdict}")
+    print(f"Running shuffled-target leakage check ({n_permutations} permutations, refits fold 1)...")
+    aucs = []
+    for i in range(n_permutations):
+        rng = np.random.default_rng(seed + i)
+        shuffled = train.copy()
+        shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
+        model = train_model(shuffled)
+        auc = _roc_auc(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        aucs.append(auc)
+        print(f"  permutation {i + 1}: {model.get_params()['n_estimators']} trees, test AUC {auc:.4f}")
+    verdict = "OK" if max(aucs) <= 0.55 else "WARNING: investigate before publishing"
+    print(f"  Shuffled-target AUC range {min(aucs):.4f} to {max(aucs):.4f} (real labels ~0.65): {verdict}")
+    return aucs
 
 
 def _purge_ablation_test(
