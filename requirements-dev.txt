@@ -1,7 +1,11 @@
 # Test and lint dependencies (CI installs these plus requirements.txt).
 # No torch/transformers: screener.py imports them lazily, and the tests
-# stub the sentiment model.
+# stub the sentiment model. yfinance and lxml are here because screener.py
+# imports yfinance at module level (network calls are stubbed in tests) and
+# the app no longer needs either.
 pytest>=8.0
 ruff>=0.5
 xgboost>=2.0
 scikit-learn>=1.4   # evaluate.py metrics, exercised by tests/test_evaluate.py
+yfinance>=0.2
+lxml>=5.0
