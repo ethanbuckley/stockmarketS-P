@@ -66,8 +66,8 @@ def test_daily_cross_sectional_metrics_hand_computed():
     day = pd.DataFrame(
         {
             "Ticker": [f"T{i:02d}" for i in range(n)],
-            "p_hat": np.linspace(1.0, 0.0, n),       # T00 ranked highest
-            "Target": [1.0] * 8 + [0.0] * 12,        # positives = top 8 by p_hat
+            "p_hat": np.linspace(1.0, 0.0, n),  # T00 ranked highest
+            "Target": [1.0] * 8 + [0.0] * 12,  # positives = top 8 by p_hat
         }
     )
     row = daily_cross_sectional_metrics(day, top_n=15, bottom_n=5)
@@ -137,9 +137,7 @@ def test_run_evaluation_end_to_end_mini():
     pytest.importorskip("xgboost")
     pytest.importorskip("sklearn")
 
-    results, daily, calib = evaluate.run_evaluation(
-        synthetic_master(), first_test_year=2020, causality_check=False
-    )
+    results, daily, calib = evaluate.run_evaluation(synthetic_master(), first_test_year=2020, causality_check=False)
 
     assert len(results["folds"]) == 2  # 2020 full, 2021 partial
     assert all(1 <= f["n_estimators"] <= 1000 for f in results["folds"])

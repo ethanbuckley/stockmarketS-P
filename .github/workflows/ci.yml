@@ -22,4 +22,5 @@ jobs:
       # model, so the suite runs network-free in about a minute.
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: ruff check .
+      - run: ruff format --check .
       - run: pytest -q

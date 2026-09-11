@@ -37,8 +37,10 @@ def save_signals(leaderboard: pd.DataFrame, candidate_prices: pd.DataFrame) -> N
     print(f"\nSignals written to {SIGNALS_PATH}  ({len(leaderboard)} rows)")
 
     candidate_prices.round(6).to_csv(CANDIDATE_PRICES_PATH, date_format="%Y-%m-%d")
-    print(f"Price history written to {CANDIDATE_PRICES_PATH}  "
-          f"({candidate_prices.shape[0]} days x {candidate_prices.shape[1]} tickers)")
+    print(
+        f"Price history written to {CANDIDATE_PRICES_PATH}  "
+        f"({candidate_prices.shape[0]} days x {candidate_prices.shape[1]} tickers)"
+    )
 
 
 def main() -> None:

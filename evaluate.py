@@ -77,13 +77,20 @@ def _roc_auc(y, p) -> float:
 
     return float(roc_auc_score(y, p))
 
+
 # Features computed by build_technical_features from a single ticker's OHLCV.
 # The remaining FEATURE_COLUMNS are macro pct_changes/shifts, causal by
 # construction; rolling/ewm windows checked here are the only nontrivial
 # windowing in the pipeline.
 TECHNICAL_FEATURES = [
-    "RSI", "MACD", "BB_Position", "Price_to_VWAP",
-    "ATR_Ratio", "Return", "Volume_Surge", "Day_Of_Week",
+    "RSI",
+    "MACD",
+    "BB_Position",
+    "Price_to_VWAP",
+    "ATR_Ratio",
+    "Return",
+    "Volume_Surge",
+    "Day_Of_Week",
 ]
 
 # Wording is shipped inside the same artefact as the numbers, so the app and
@@ -112,10 +119,11 @@ CAVEATS = [
 # FOLDS AND LEAKAGE CONTROL
 # =============================================================================
 
+
 @dataclass(frozen=True)
 class Fold:
     fold_id: int
-    train_end: pd.Timestamp   # last usable training date, after the purge
+    train_end: pd.Timestamp  # last usable training date, after the purge
     test_start: pd.Timestamp
     test_end: pd.Timestamp
     partial: bool
@@ -148,10 +156,7 @@ def make_folds(
         test_start, test_end = test_dates[0], test_dates[-1]
         pos = int(cal.searchsorted(test_start))
         if pos - purge_days - 1 < 0:
-            raise ValueError(
-                f"Not enough history before {year} to train after a "
-                f"{purge_days}-day purge."
-            )
+            raise ValueError(f"Not enough history before {year} to train after a {purge_days}-day purge.")
         fold_id += 1
         folds.append(
             Fold(
@@ -167,9 +172,7 @@ def make_folds(
     return folds
 
 
-def split_fold(
-    valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_fold(valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Splits the filtered (complete features + valid label) frame into the
     fold's train and test sets, and asserts the purge gap held.
@@ -185,20 +188,15 @@ def split_fold(
     train_max_pos = int(cal.searchsorted(train.index.max()))
     test_min_pos = int(cal.searchsorted(test.index.min()))
     assert train_max_pos + FORWARD_WINDOW_DAYS < test_min_pos, (
-        f"Fold {fold.fold_id}: purge violated "
-        f"(train ends at position {train_max_pos}, test starts at {test_min_pos})."
+        f"Fold {fold.fold_id}: purge violated (train ends at position {train_max_pos}, test starts at {test_min_pos})."
     )
     return train, test
 
 
-def reconcile_rows(
-    valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int
-) -> None:
+def reconcile_rows(valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int) -> None:
     """Accounts for every filtered row: train + purged + test + outside."""
     n_total = len(valid_df)
-    n_purged = int(
-        ((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum()
-    )
+    n_purged = int(((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum())
     n_outside = int((valid_df.index > fold.test_end).sum())
     assert n_train + n_purged + n_test + n_outside == n_total, (
         f"Fold {fold.fold_id}: row reconciliation failed "
@@ -223,9 +221,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 
     for ticker in chosen:
         sub = (
-            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]]
-            .dropna(subset=["Close"])
-            .copy()
+            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]].dropna(subset=["Close"]).copy()
         )
         cut_pos = int(rng.integers(40, len(sub)))
         cutoff = sub.index[cut_pos]
@@ -245,6 +241,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 # =============================================================================
 # METRICS
 # =============================================================================
+
 
 def daily_cross_sectional_metrics(
     day_df: pd.DataFrame,
@@ -400,6 +397,7 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
 # EVALUATION DRIVER
 # =============================================================================
 
+
 def run_evaluation(
     master_df: pd.DataFrame,
     first_test_year: int = 2020,
@@ -485,8 +483,16 @@ def run_evaluation(
     overall_daily = daily_aggregates(daily_all, seed=seed)
     # Lean CSV schema; excess_bottom5 is derivable as base_rate - bottom5_pos_rate
     daily_df = daily_all[
-        ["date", "fold_id", "n_candidates", "base_rate", "precision_top15",
-         "excess_top15", "bottom5_pos_rate", "top_decile_lift"]
+        [
+            "date",
+            "fold_id",
+            "n_candidates",
+            "base_rate",
+            "precision_top15",
+            "excess_top15",
+            "bottom5_pos_rate",
+            "top_decile_lift",
+        ]
     ]
 
     y_pooled = np.concatenate(pooled_y)
@@ -573,6 +579,7 @@ def _purge_ablation_test(
 # ARTEFACT WRITING
 # =============================================================================
 
+
 def _json_safe(obj):
     """Rounds floats and converts NaN to null so the JSON is strict and stable."""
     if isinstance(obj, float):
@@ -588,7 +595,9 @@ def _git_commit() -> str:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
             check=True,
         )
         return out.stdout.strip()
@@ -703,29 +712,34 @@ def write_artefacts(
 # MAIN
 # =============================================================================
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Walk-forward validation of the screener's XGBoost classifier."
-    )
+    parser = argparse.ArgumentParser(description="Walk-forward validation of the screener's XGBoost classifier.")
     parser.add_argument(
-        "--first-test-year", type=int, default=2020,
+        "--first-test-year",
+        type=int,
+        default=2020,
         help="first calendar year used as a test block (default 2020)",
     )
     parser.add_argument(
-        "--skip-partial", action="store_true",
+        "--skip-partial",
+        action="store_true",
         help="exclude the final, incomplete calendar year from the folds",
     )
     parser.add_argument(
-        "--cache", metavar="PATH", default=None,
-        help="pickle the labelled master panel here and reuse it on later runs "
-             "(e.g. master_cache.pkl; gitignored)",
+        "--cache",
+        metavar="PATH",
+        default=None,
+        help="pickle the labelled master panel here and reuse it on later runs (e.g. master_cache.pkl; gitignored)",
     )
     parser.add_argument(
-        "--shuffled-target-check", action="store_true",
+        "--shuffled-target-check",
+        action="store_true",
         help="leakage canary: refit fold 1 on permuted labels, expect test AUC ~0.5",
     )
     parser.add_argument(
-        "--purge-ablation", action="store_true",
+        "--purge-ablation",
+        action="store_true",
         help="refit fold 1 without the purge and report the boundary-leakage AUC gap",
     )
     return parser.parse_args(argv)

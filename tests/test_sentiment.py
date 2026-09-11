@@ -82,9 +82,7 @@ def test_fetch_failure_returns_none_not_zero(monkeypatch):
 
 def test_signed_mean_of_positive_and_negative(monkeypatch):
     fake_ticker(monkeypatch, [{"title": "Good"}, {"title": "Bad"}])
-    model = RecordingModel(
-        [{"label": "positive", "score": 0.8}, {"label": "negative", "score": 0.4}]
-    )
+    model = RecordingModel([{"label": "positive", "score": 0.8}, {"label": "negative", "score": 0.4}])
     assert get_news_sentiment("ACME", model) == pytest.approx(0.2)
 
 
@@ -104,10 +102,13 @@ def test_article_cap_is_enforced(monkeypatch):
 
 
 def test_stale_headlines_are_skipped_new_format(monkeypatch):
-    fake_ticker(monkeypatch, [
-        {"content": {"title": "Fresh", "pubDate": days_ago(1)}},
-        {"content": {"title": "Stale", "pubDate": days_ago(NEWS_MAX_AGE_DAYS + 1)}},
-    ])
+    fake_ticker(
+        monkeypatch,
+        [
+            {"content": {"title": "Fresh", "pubDate": days_ago(1)}},
+            {"content": {"title": "Stale", "pubDate": days_ago(NEWS_MAX_AGE_DAYS + 1)}},
+        ],
+    )
     model = RecordingModel(neutral(2))
     get_news_sentiment("ACME", model, now=NOW)
     assert model.calls == [["Fresh"]]
@@ -116,10 +117,13 @@ def test_stale_headlines_are_skipped_new_format(monkeypatch):
 def test_stale_headlines_are_skipped_old_format_epoch(monkeypatch):
     fresh = int((NOW - pd.Timedelta(days=2)).timestamp())
     stale = int((NOW - pd.Timedelta(days=60)).timestamp())
-    fake_ticker(monkeypatch, [
-        {"title": "Fresh", "providerPublishTime": fresh},
-        {"title": "Stale", "providerPublishTime": stale},
-    ])
+    fake_ticker(
+        monkeypatch,
+        [
+            {"title": "Fresh", "providerPublishTime": fresh},
+            {"title": "Stale", "providerPublishTime": stale},
+        ],
+    )
     model = RecordingModel(neutral(2))
     get_news_sentiment("ACME", model, now=NOW)
     assert model.calls == [["Fresh"]]

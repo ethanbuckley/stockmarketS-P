@@ -65,6 +65,7 @@ PRICE_FIELDS = ["Open", "High", "Low", "Close"]
 # STEP 1: DATA ACQUISITION
 # =============================================================================
 
+
 def fetch_sp500_constituents() -> pd.DataFrame:
     """
     Scrapes the current S&P 500 constituent table from Wikipedia.
@@ -95,8 +96,7 @@ def fetch_sp500_constituents() -> pd.DataFrame:
     tables = pd.read_html(StringIO(response.text))
     if not tables or "Symbol" not in tables[0].columns:
         raise RuntimeError(
-            "Could not parse the S&P 500 constituents table from Wikipedia "
-            "(the page layout may have changed)."
+            "Could not parse the S&P 500 constituents table from Wikipedia (the page layout may have changed)."
         )
     table = tables[0]
     constituents = pd.DataFrame(
@@ -162,6 +162,7 @@ def tickers_with_data(raw_data: pd.DataFrame) -> list[str]:
 # STEP 2: FEATURE ENGINEERING
 # =============================================================================
 
+
 def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     Applies triple-barrier labelling to create the target variable.
@@ -179,8 +180,8 @@ def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     """
     W = FORWARD_WINDOW_DAYS
     closes = df["Close"].to_numpy(dtype=float)
-    highs  = df["High"].to_numpy(dtype=float)
-    lows   = df["Low"].to_numpy(dtype=float)
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
     n = len(closes)
 
     if n <= W:
@@ -194,14 +195,14 @@ def apply_triple_barrier_labels(df: pd.DataFrame) -> pd.DataFrame:
     # sliding_window_view gives (n-W+1) windows; slicing [1:] drops window 0
     # (which starts at bar 0) so row i of the result covers bars i+1...i+W.
     # Valid for i in 0 ... n-W-1, matching the original loop range.
-    forward_highs = sliding_window_view(highs, W)[1:]   # shape (n-W, W)
-    forward_lows  = sliding_window_view(lows,  W)[1:]   # shape (n-W, W)
+    forward_highs = sliding_window_view(highs, W)[1:]  # shape (n-W, W)
+    forward_lows = sliding_window_view(lows, W)[1:]  # shape (n-W, W)
 
     upper_barriers = (closes[: n - W] * (1 + TAKE_PROFIT_PCT))[:, None]  # (n-W, 1)
-    lower_barriers = (closes[: n - W] * (1 - STOP_LOSS_PCT))[:, None]    # (n-W, 1)
+    lower_barriers = (closes[: n - W] * (1 - STOP_LOSS_PCT))[:, None]  # (n-W, 1)
 
     hit_upper = forward_highs >= upper_barriers  # (n-W, W) bool
-    hit_lower = forward_lows  <= lower_barriers  # (n-W, W) bool
+    hit_lower = forward_lows <= lower_barriers  # (n-W, W) bool
 
     # Index of first crossing within the window; W means "never crossed"
     first_upper = np.where(hit_upper.any(axis=1), np.argmax(hit_upper, axis=1), W)
@@ -376,9 +377,9 @@ def build_master_dataframe(
 
 
 class Dataset(NamedTuple):
-    train: pd.DataFrame    # rows with complete features and a valid label
-    latest: pd.DataFrame   # most recent complete-feature row per ticker (today's signal)
-    master: pd.DataFrame   # the unfiltered panel (for price history export)
+    train: pd.DataFrame  # rows with complete features and a valid label
+    latest: pd.DataFrame  # most recent complete-feature row per ticker (today's signal)
+    master: pd.DataFrame  # the unfiltered panel (for price history export)
 
 
 def build_dataset(tickers_limit: int | None = None) -> Dataset:
@@ -386,13 +387,7 @@ def build_dataset(tickers_limit: int | None = None) -> Dataset:
     master_df, _ = build_master_dataframe(tickers_limit=tickers_limit)
 
     train_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"]).copy()
-    latest_df = (
-        master_df
-        .dropna(subset=FEATURE_COLUMNS)
-        .groupby("Ticker")
-        .tail(1)
-        .copy()
-    )
+    latest_df = master_df.dropna(subset=FEATURE_COLUMNS).groupby("Ticker").tail(1).copy()
     return Dataset(train_df, latest_df, master_df)
 
 
@@ -414,6 +409,7 @@ def candidate_price_history(
 # =============================================================================
 # STEP 3: MODEL TRAINING
 # =============================================================================
+
 
 def train_model(train_df: pd.DataFrame) -> XGBClassifier:
     """
@@ -471,7 +467,8 @@ def choose_n_estimators(train_df: pd.DataFrame) -> int | None:
 
     probe = XGBClassifier(**XGB_PARAMS, early_stopping_rounds=EARLY_STOPPING_ROUNDS)
     probe.fit(
-        fit[FEATURE_COLUMNS], fit["Target"],
+        fit[FEATURE_COLUMNS],
+        fit["Target"],
         eval_set=[(val[FEATURE_COLUMNS], val["Target"])],
         verbose=False,
     )
@@ -501,6 +498,7 @@ def score_and_rank(model: XGBClassifier, latest_df: pd.DataFrame) -> pd.DataFram
 # =============================================================================
 # STEP 4: SENTIMENT ANALYSIS (FINBERT)
 # =============================================================================
+
 
 def load_sentiment_model():
     """
@@ -597,8 +595,9 @@ def get_news_sentiment(ticker: str, sentiment_model, now: pd.Timestamp | None = 
 # STEP 5: PIPELINE ORCHESTRATION
 # =============================================================================
 
+
 class PipelineOutput(NamedTuple):
-    leaderboard: pd.DataFrame       # Ticker, Close, Confidence, Sentiment_Score, Signal_Pool
+    leaderboard: pd.DataFrame  # Ticker, Close, Confidence, Sentiment_Score, Signal_Pool
     candidate_prices: pd.DataFrame  # PRICE_HISTORY_DAYS of adjusted closes per candidate
 
 
@@ -646,6 +645,7 @@ def run_pipeline(tickers_limit: int | None = None, skip_sentiment: bool = False)
 # =============================================================================
 # STEP 6: OUTPUT FORMATTING
 # =============================================================================
+
 
 def print_results(leaderboard: pd.DataFrame) -> None:
     """Prints the final screener results to the console in a readable format."""
@@ -695,16 +695,19 @@ def print_results(leaderboard: pd.DataFrame) -> None:
 # MAIN
 # =============================================================================
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="S&P 500 stock screener: XGBoost signals plus FinBERT news sentiment."
-    )
+    parser = argparse.ArgumentParser(description="S&P 500 stock screener: XGBoost signals plus FinBERT news sentiment.")
     parser.add_argument(
-        "--tickers-limit", type=int, default=None, metavar="N",
+        "--tickers-limit",
+        type=int,
+        default=None,
+        metavar="N",
         help="only process the first N tickers (fast smoke run; not for real signals)",
     )
     parser.add_argument(
-        "--skip-sentiment", action="store_true",
+        "--skip-sentiment",
+        action="store_true",
         help="skip the FinBERT sentiment stage; Sentiment_Score is left blank",
     )
     return parser.parse_args(argv)

@@ -123,6 +123,7 @@ def is_short(df: pd.DataFrame) -> pd.Series:
 # DATA LOADING
 # =============================================================================
 
+
 @st.cache_data(ttl=3600)
 def load_signals(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -155,6 +156,7 @@ def load_validation_artefacts():
 # MONTE CARLO ENGINE
 # =============================================================================
 
+
 def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
     """Lower-triangular Cholesky factor of a correlation matrix.
 
@@ -172,7 +174,7 @@ def _safe_cholesky(corr: np.ndarray) -> np.ndarray:
         vals = np.clip(vals, 1e-8, None)
         fixed = vecs @ np.diag(vals) @ vecs.T
         d = np.sqrt(np.diag(fixed))
-        fixed = fixed / np.outer(d, d)            # renormalise to unit diagonal
+        fixed = fixed / np.outer(d, d)  # renormalise to unit diagonal
         return np.linalg.cholesky(fixed)
 
 
@@ -198,8 +200,8 @@ def simulate_growth(
     """
     rng = np.random.default_rng(seed)
 
-    mu = log_ret.mean().values          # daily mean log-return per asset
-    sigma = log_ret.std().values        # daily vol per asset
+    mu = log_ret.mean().values  # daily mean log-return per asset
+    sigma = log_ret.std().values  # daily vol per asset
     L = _safe_cholesky(log_ret.corr().values)
     n_assets = len(mu)
 
@@ -211,12 +213,12 @@ def simulate_growth(
     # and we simulate that directly. Subtracting an extra ½σ² here would apply the
     # Itô correction a second time and bias the drift downward (worse for volatile
     # names and long horizons).
-    daily_log_ret = mu + sigma * Z_corr      # dt = 1 day
+    daily_log_ret = mu + sigma * Z_corr  # dt = 1 day
 
     # Equal-weighted (in log space) portfolio log-return each day
     w = np.ones(n_assets) / n_assets
-    port_daily = daily_log_ret @ w                   # (n_paths, horizon)
-    port_cum = np.cumsum(port_daily, axis=1)         # (n_paths, horizon)
+    port_daily = daily_log_ret @ w  # (n_paths, horizon)
+    port_cum = np.cumsum(port_daily, axis=1)  # (n_paths, horizon)
 
     growth = np.exp(
         np.concatenate([np.zeros((n_paths, 1)), port_cum], axis=1)
@@ -228,6 +230,7 @@ def simulate_growth(
 # =============================================================================
 # PAGE SECTIONS
 # =============================================================================
+
 
 def render_header() -> None:
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
@@ -270,7 +273,11 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     if conf_lo == conf_hi:  # single candidate / all-equal confidence -> avoid slider crash
         conf_hi = conf_lo + 0.1
     conf_range = st.sidebar.slider(
-        "Confidence (%)", min_value=conf_lo, max_value=conf_hi, value=(conf_lo, conf_hi), step=0.1,
+        "Confidence (%)",
+        min_value=conf_lo,
+        max_value=conf_hi,
+        value=(conf_lo, conf_hi),
+        step=0.1,
     )
 
     # A blank Sentiment_Score means no news was available at generation time;
@@ -284,7 +291,11 @@ def sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     if sent_lo == sent_hi:
         sent_hi = sent_lo + 0.01
     sent_range = st.sidebar.slider(
-        "Sentiment Score", min_value=sent_lo, max_value=sent_hi, value=(sent_lo, sent_hi), step=0.01,
+        "Sentiment Score",
+        min_value=sent_lo,
+        max_value=sent_hi,
+        value=(sent_lo, sent_hi),
+        step=0.01,
     )
 
     signal_filter = st.sidebar.radio("Signal type", options=["All", LONG_LABEL, SHORT_LABEL])
@@ -331,8 +342,11 @@ def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
         top10 = df.nlargest(10, "Confidence").sort_values("Confidence")
         fig_bar = px.bar(
             top10,
-            x="Confidence", y="Ticker", orientation="h",
-            color="Confidence", color_continuous_scale="RdYlGn",
+            x="Confidence",
+            y="Ticker",
+            orientation="h",
+            color="Confidence",
+            color_continuous_scale="RdYlGn",
             labels={"Confidence": "Confidence (%)"},
             title="Top 10 by Model Confidence",
         )
@@ -343,15 +357,24 @@ def render_screener(df: pd.DataFrame, filtered: pd.DataFrame) -> None:
         st.subheader("Confidence vs Sentiment")
         plot_df = df.assign(Pool=df["Signal_Pool"].map(POOL_LABEL))
         fig_scatter = px.scatter(
-            plot_df, x="Sentiment_Score", y="Confidence", text="Ticker", color="Pool",
+            plot_df,
+            x="Sentiment_Score",
+            y="Confidence",
+            text="Ticker",
+            color="Pool",
             color_discrete_map={POOL_LABEL[LONG_POOL]: "#34D399", POOL_LABEL[SHORT_POOL]: "#F87171"},
-            labels={"Sentiment_Score": "FinBERT Sentiment Score",
-                    "Confidence": "XGBoost Confidence (%)"},
+            labels={"Sentiment_Score": "FinBERT Sentiment Score", "Confidence": "XGBoost Confidence (%)"},
             title="Signal Map",
         )
         fig_scatter.update_traces(textposition="top center", marker_size=8)
-        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5,
-                              annotation_text="neutral news", annotation_position="top")
+        fig_scatter.add_vline(
+            x=0,
+            line_dash="dash",
+            line_color="gray",
+            opacity=0.5,
+            annotation_text="neutral news",
+            annotation_position="top",
+        )
         fig_scatter.update_layout(legend=dict(orientation="h", y=1.12), margin=dict(l=0, r=0, t=60, b=0))
         st.plotly_chart(style_plotly(fig_scatter), width="stretch")
         st.caption(
@@ -509,13 +532,15 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
     cvar_loss = max(initial_value - cvar_95, 0.0)
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("VaR (95%)", f"${var_loss:,.0f}",
-              help="Loss not exceeded in 95% of scenarios: you lose less than "
-                   "this (vs. the starting value) 95% of the time")
-    m2.metric("CVaR (95%)", f"${cvar_loss:,.0f}",
-              help="Average loss in the worst 5% of scenarios (Expected Shortfall)")
-    m3.metric("P(loss)", f"{p_loss*100:.1f}%",
-              help="Fraction of simulated paths that end below the initial investment")
+    m1.metric(
+        "VaR (95%)",
+        f"${var_loss:,.0f}",
+        help="Loss not exceeded in 95% of scenarios: you lose less than this (vs. the starting value) 95% of the time",
+    )
+    m2.metric("CVaR (95%)", f"${cvar_loss:,.0f}", help="Average loss in the worst 5% of scenarios (Expected Shortfall)")
+    m3.metric(
+        "P(loss)", f"{p_loss * 100:.1f}%", help="Fraction of simulated paths that end below the initial investment"
+    )
     m4.metric("Median return", f"{med_ret:+.1f}%")
     m5.metric("Mean return", f"{mean_ret:+.1f}%")
 
@@ -533,28 +558,47 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
     pcts = np.percentile(port_values, [5, 25, 50, 75, 95], axis=0)
 
     fig_fan = go.Figure()
-    fig_fan.add_trace(go.Scatter(
-        x=t_axis + t_axis[::-1],
-        y=pcts[4].tolist() + pcts[0].tolist()[::-1],
-        fill="toself", fillcolor="rgba(99,102,241,0.16)",
-        line=dict(width=0), name="5th–95th pct", showlegend=True,
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=t_axis + t_axis[::-1],
-        y=pcts[3].tolist() + pcts[1].tolist()[::-1],
-        fill="toself", fillcolor="rgba(99,102,241,0.28)",
-        line=dict(width=0), name="25th–75th pct", showlegend=True,
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=t_axis, y=pcts[2], name="Median",
-        line=dict(color=ACCENT, width=2.5),
-    ))
-    fig_fan.add_hline(y=initial_value, line_dash="dot",
-                      line_color="gray", opacity=0.6,
-                      annotation_text="Initial value", annotation_position="right")
+    fig_fan.add_trace(
+        go.Scatter(
+            x=t_axis + t_axis[::-1],
+            y=pcts[4].tolist() + pcts[0].tolist()[::-1],
+            fill="toself",
+            fillcolor="rgba(99,102,241,0.16)",
+            line=dict(width=0),
+            name="5th–95th pct",
+            showlegend=True,
+        )
+    )
+    fig_fan.add_trace(
+        go.Scatter(
+            x=t_axis + t_axis[::-1],
+            y=pcts[3].tolist() + pcts[1].tolist()[::-1],
+            fill="toself",
+            fillcolor="rgba(99,102,241,0.28)",
+            line=dict(width=0),
+            name="25th–75th pct",
+            showlegend=True,
+        )
+    )
+    fig_fan.add_trace(
+        go.Scatter(
+            x=t_axis,
+            y=pcts[2],
+            name="Median",
+            line=dict(color=ACCENT, width=2.5),
+        )
+    )
+    fig_fan.add_hline(
+        y=initial_value,
+        line_dash="dot",
+        line_color="gray",
+        opacity=0.6,
+        annotation_text="Initial value",
+        annotation_position="right",
+    )
     fig_fan.update_layout(
         title=f"Simulated portfolio paths, {horizon}-day horizon  "
-              f"({n_paths:,} paths, equal-weighted: {', '.join(valid_tickers)})",
+        f"({n_paths:,} paths, equal-weighted: {', '.join(valid_tickers)})",
         xaxis_title="Trading days",
         yaxis_title="Portfolio value ($)",
         legend=dict(orientation="h", y=1.12),
@@ -565,16 +609,24 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
 
     # ── Final value distribution ───────────────────────────────────────────────
     fig_hist = go.Figure()
-    fig_hist.add_trace(go.Histogram(
-        x=final_values, nbinsx=80,
-        marker_color=ACCENT, opacity=0.75, name="Final value",
-    ))
-    fig_hist.add_vline(x=initial_value, line_dash="dot", line_color="gray",
-                       annotation_text="Initial", annotation_position="top right")
-    fig_hist.add_vline(x=var_95, line_dash="dash", line_color="#DC2626",
-                       annotation_text="VaR 95%", annotation_position="top left")
-    fig_hist.add_vline(x=cvar_95, line_dash="dash", line_color="#F97316",
-                       annotation_text="CVaR 95%", annotation_position="top left")
+    fig_hist.add_trace(
+        go.Histogram(
+            x=final_values,
+            nbinsx=80,
+            marker_color=ACCENT,
+            opacity=0.75,
+            name="Final value",
+        )
+    )
+    fig_hist.add_vline(
+        x=initial_value, line_dash="dot", line_color="gray", annotation_text="Initial", annotation_position="top right"
+    )
+    fig_hist.add_vline(
+        x=var_95, line_dash="dash", line_color="#DC2626", annotation_text="VaR 95%", annotation_position="top left"
+    )
+    fig_hist.add_vline(
+        x=cvar_95, line_dash="dash", line_color="#F97316", annotation_text="CVaR 95%", annotation_position="top left"
+    )
     fig_hist.update_layout(
         title="Distribution of final portfolio value",
         xaxis_title="Portfolio value ($)",
@@ -594,12 +646,14 @@ def render_monte_carlo(df: pd.DataFrame) -> None:
     with st.expander("Individual asset statistics (from historical data)"):
         ann_ret = log_ret.mean() * 252
         ann_vol = log_ret.std() * np.sqrt(252)
-        asset_stats = pd.DataFrame({
-            "Ticker": valid_tickers,
-            "Ann. Return (%)": (ann_ret * 100).round(2).values,
-            "Ann. Vol (%)": (ann_vol * 100).round(2).values,
-            "Sharpe (rf=0)": (ann_ret / ann_vol).round(3).values,
-        })
+        asset_stats = pd.DataFrame(
+            {
+                "Ticker": valid_tickers,
+                "Ann. Return (%)": (ann_ret * 100).round(2).values,
+                "Ann. Vol (%)": (ann_vol * 100).round(2).values,
+                "Sharpe (rf=0)": (ann_ret / ann_vol).round(3).values,
+            }
+        )
         st.dataframe(asset_stats, width="stretch", hide_index=True)
 
         st.markdown("**Return correlation matrix (daily, committed history)**")
@@ -658,8 +712,7 @@ def render_validation() -> None:
     st.subheader("Walk-Forward Validation")
 
     artefacts_present = all(
-        os.path.exists(p)
-        for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIBRATION_PATH)
+        os.path.exists(p) for p in (VALIDATION_METRICS_PATH, VALIDATION_DAILY_PATH, VALIDATION_CALIBRATION_PATH)
     )
     if not artefacts_present:
         st.info(
@@ -685,26 +738,29 @@ def render_validation() -> None:
 
     v1, v2, v3, v4, v5 = st.columns(5)
     v1.metric(
-        "ROC AUC (pooled)", f"{pooled['roc_auc']:.3f}",
+        "ROC AUC (pooled)",
+        f"{pooled['roc_auc']:.3f}",
         help="Across all out-of-sample test rows, each scored by its own fold's model. 0.5 is chance.",
     )
     v2.metric(
-        "Brier score", f"{pooled['brier']:.3f}",
+        "Brier score",
+        f"{pooled['brier']:.3f}",
         help="Mean squared error of the predicted probabilities; lower is better.",
     )
     v3.metric(
         "Precision@15 (daily mean)",
         f"{overall['precision_top15_mean'] * 100:.1f}%",
         delta=f"{overall['excess_precision_top15_mean'] * 100:+.1f} pts vs base rate",
-        help="Fraction of each day's top-15 picks whose take-profit barrier "
-             "was hit first, averaged over test days.",
+        help="Fraction of each day's top-15 picks whose take-profit barrier was hit first, averaged over test days.",
     )
     v4.metric(
-        "Daily base rate", f"{overall['base_rate_daily_mean'] * 100:.1f}%",
+        "Daily base rate",
+        f"{overall['base_rate_daily_mean'] * 100:.1f}%",
         help="Average fraction of all stocks that hit the take-profit barrier first on a given test day.",
     )
     v5.metric(
-        "Top-decile lift", f"{overall['top_decile_lift_mean']:.2f}x",
+        "Top-decile lift",
+        f"{overall['top_decile_lift_mean']:.2f}x",
         help="Hit rate of the top decile by predicted probability relative to the day's base rate.",
     )
     ci_lo, ci_hi = overall["excess_precision_top15_ci95"]
@@ -720,32 +776,29 @@ def render_validation() -> None:
 
     # The caveats ship inside the same artefact as the numbers, so they
     # are always rendered alongside them.
-    st.warning(
-        "**Read before quoting these numbers**\n\n"
-        + "\n".join(f"- {c}" for c in metrics["caveats"])
-    )
+    st.warning("**Read before quoting these numbers**\n\n" + "\n".join(f"- {c}" for c in metrics["caveats"]))
 
     st.divider()
 
     folds_df = pd.DataFrame(scheme["folds"])[["fold_id", "test_start", "partial"]]
     perf_df = pd.DataFrame(metrics["results"]["per_fold"])
     fold_table = folds_df.merge(perf_df, on="fold_id")
-    fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(
-        fold_table["partial"], " (partial)", ""
-    )
+    fold_table["Test year"] = fold_table["test_start"].str[:4] + np.where(fold_table["partial"], " (partial)", "")
     year_label = dict(zip(fold_table["fold_id"], fold_table["Test year"], strict=True))
 
     st.subheader("Per-Fold Results")
-    display = pd.DataFrame({
-        "Test year": fold_table["Test year"],
-        "Test rows": fold_table["n_test_rows"],
-        "ROC AUC": fold_table["roc_auc"].round(3),
-        "Brier": fold_table["brier"].round(3),
-        "Base rate": (fold_table["base_rate"] * 100).round(1),
-        "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
-        "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
-        "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
-    })
+    display = pd.DataFrame(
+        {
+            "Test year": fold_table["Test year"],
+            "Test rows": fold_table["n_test_rows"],
+            "ROC AUC": fold_table["roc_auc"].round(3),
+            "Brier": fold_table["brier"].round(3),
+            "Base rate": (fold_table["base_rate"] * 100).round(1),
+            "P@15 mean (%)": (fold_table["precision_top15_mean"] * 100).round(1),
+            "Excess (pts)": (fold_table["excess_precision_top15_mean"] * 100).round(1),
+            "Days beating base (%)": (fold_table["frac_days_top15_beats_base"] * 100).round(0),
+        }
+    )
     st.dataframe(display, width="stretch", hide_index=True)
 
     col_box, col_rel = st.columns(2)
@@ -759,11 +812,12 @@ def render_validation() -> None:
             var_name="Metric",
             value_name="Value",
         )
-        box_df["Metric"] = box_df["Metric"].map(
-            {"precision_top15": "Precision@15", "base_rate": "Base rate"}
-        )
+        box_df["Metric"] = box_df["Metric"].map({"precision_top15": "Precision@15", "base_rate": "Base rate"})
         fig_box = px.box(
-            box_df, x="Test year", y="Value", color="Metric",
+            box_df,
+            x="Test year",
+            y="Value",
+            color="Metric",
             title="Daily precision@15 vs base rate, by test year",
             color_discrete_sequence=[ACCENT, MUTED],
         )
@@ -779,17 +833,27 @@ def render_validation() -> None:
         lo = float(pooled_calib["mean_predicted"].min())
         hi = float(pooled_calib["mean_predicted"].max())
         fig_rel = go.Figure()
-        fig_rel.add_trace(go.Scatter(
-            x=[lo, hi], y=[lo, hi], mode="lines", name="Perfect calibration",
-            line=dict(color="gray", dash="dash"),
-        ))
-        fig_rel.add_trace(go.Scatter(
-            x=pooled_calib["mean_predicted"], y=pooled_calib["observed_rate"],
-            mode="lines+markers", name="Model (pooled)",
-            line=dict(color=ACCENT, width=2.5), marker_size=8,
-            customdata=pooled_calib["count"],
-            hovertemplate="Predicted %{x:.3f}<br>Observed %{y:.3f}<br>n=%{customdata}<extra></extra>",
-        ))
+        fig_rel.add_trace(
+            go.Scatter(
+                x=[lo, hi],
+                y=[lo, hi],
+                mode="lines",
+                name="Perfect calibration",
+                line=dict(color="gray", dash="dash"),
+            )
+        )
+        fig_rel.add_trace(
+            go.Scatter(
+                x=pooled_calib["mean_predicted"],
+                y=pooled_calib["observed_rate"],
+                mode="lines+markers",
+                name="Model (pooled)",
+                line=dict(color=ACCENT, width=2.5),
+                marker_size=8,
+                customdata=pooled_calib["count"],
+                hovertemplate="Predicted %{x:.3f}<br>Observed %{y:.3f}<br>n=%{customdata}<extra></extra>",
+            )
+        )
         fig_rel.update_layout(
             title="Reliability curve (quantile bins, pooled test rows)",
             xaxis_title="Mean predicted probability",
@@ -804,14 +868,14 @@ def render_validation() -> None:
             f"""
             **Protocol.** Expanding-window walk-forward validation with
             calendar-year test blocks, starting in
-            {scheme['first_test_year']}. For each fold, the model is
+            {scheme["first_test_year"]}. For each fold, the model is
             retrained from scratch on all data up to the fold's training
             cutoff using the production training code and hyperparameters,
             then scores every day in the test year.
 
             **Leakage control.** The triple-barrier label for day *t* looks
-            at the next {scheme['purge_trading_days']} trading days, so the
-            last {scheme['purge_trading_days']} trading days before each
+            at the next {scheme["purge_trading_days"]} trading days, so the
+            last {scheme["purge_trading_days"]} trading days before each
             test block are removed from training: their labels would peek
             into the test period. All features are strictly backward-looking
             (rolling windows, exponential averages, lags), which is enforced
@@ -826,7 +890,7 @@ def render_validation() -> None:
             Brier score are computed over all test rows; the reliability
             curve shows whether predicted probabilities match observed
             frequencies. Confidence intervals use a moving-block bootstrap
-            (block length {scheme['purge_trading_days']}) because
+            (block length {scheme["purge_trading_days"]}) because
             overlapping label windows make consecutive days dependent.
 
             The full implementation is in `evaluate.py`; every number on
@@ -840,6 +904,7 @@ def render_validation() -> None:
 # =============================================================================
 # MAIN
 # =============================================================================
+
 
 def main() -> None:
     st.set_page_config(page_title="S&P 500 AI Screener", page_icon="📈", layout="wide")

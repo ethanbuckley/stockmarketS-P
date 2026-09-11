@@ -30,19 +30,35 @@ MACRO_TICKERS = ["SPY", "QQQ", "SMH", "^VIX", "^TNX"]
 PRICE_HISTORY_DAYS = 252
 
 # --- Triple-barrier labelling ------------------------------------------------
-FORWARD_WINDOW_DAYS = 5   # How many trading days ahead to look
-TAKE_PROFIT_PCT = 0.04    # +4% triggers a positive label (1)
-STOP_LOSS_PCT = 0.04      # -4% triggers a negative label (0)
+FORWARD_WINDOW_DAYS = 5  # How many trading days ahead to look
+TAKE_PROFIT_PCT = 0.04  # +4% triggers a positive label (1)
+STOP_LOSS_PCT = 0.04  # -4% triggers a negative label (0)
 
 # --- Model -------------------------------------------------------------------
 # The feature set fed to XGBoost; each feature is listed explicitly for clarity
 FEATURE_COLUMNS = [
-    "Return", "RSI", "MACD", "BB_Position",
-    "Price_to_VWAP", "ATR_Ratio", "Volume_Surge", "Day_Of_Week",
-    "SPY_Return", "QQQ_Return", "SMH_Return", "VIX_Change", "TNX_Change",
-    "Rel_SPY", "Rel_QQQ", "Rel_SMH",
-    "Return_Lag_1", "Return_Lag_2", "Return_Lag_3",
-    "QQQ_Lag_1", "QQQ_Lag_2", "QQQ_Lag_3",
+    "Return",
+    "RSI",
+    "MACD",
+    "BB_Position",
+    "Price_to_VWAP",
+    "ATR_Ratio",
+    "Volume_Surge",
+    "Day_Of_Week",
+    "SPY_Return",
+    "QQQ_Return",
+    "SMH_Return",
+    "VIX_Change",
+    "TNX_Change",
+    "Rel_SPY",
+    "Rel_QQQ",
+    "Rel_SMH",
+    "Return_Lag_1",
+    "Return_Lag_2",
+    "Return_Lag_3",
+    "QQQ_Lag_1",
+    "QQQ_Lag_2",
+    "QQQ_Lag_3",
 ]
 
 # n_estimators is a ceiling: train_model picks the tree count by early
@@ -58,18 +74,18 @@ XGB_PARAMS = {
     "tree_method": "hist",
 }
 EARLY_STOPPING_ROUNDS = 30
-EARLY_STOPPING_VALIDATION_FRACTION = 0.10   # of unique training dates
-EARLY_STOPPING_MIN_VALIDATION_DAYS = 40     # below this, fit the ceiling instead
+EARLY_STOPPING_VALIDATION_FRACTION = 0.10  # of unique training dates
+EARLY_STOPPING_MIN_VALIDATION_DAYS = 40  # below this, fit the ceiling instead
 
 # --- Signals -----------------------------------------------------------------
 # How many candidates to deep-dive with FinBERT sentiment. These ranks ARE the
 # signal: a stock in the long pool with positive news sentiment is a long
 # candidate, one in the short pool with negative sentiment a short candidate.
-TOP_N_CANDIDATES = 15    # long pool (highest predicted probability)
+TOP_N_CANDIDATES = 15  # long pool (highest predicted probability)
 BOTTOM_N_CANDIDATES = 5  # short pool (lowest predicted probability)
 LONG_POOL = "long"
 SHORT_POOL = "short"
 
 # --- News sentiment ----------------------------------------------------------
 NEWS_ARTICLES_PER_TICKER = 10
-NEWS_MAX_AGE_DAYS = 7    # headlines older than this are not "today's sentiment"
+NEWS_MAX_AGE_DAYS = 7  # headlines older than this are not "today's sentiment"

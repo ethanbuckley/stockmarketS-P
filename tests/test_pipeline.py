@@ -20,9 +20,7 @@ N_DAYS = 80
 
 def constituents(tickers, date_added=None) -> pd.DataFrame:
     """Wikipedia-shaped constituent table; unknown join dates by default."""
-    return pd.DataFrame(
-        {"Ticker": list(tickers), "Date_Added": pd.to_datetime([date_added] * len(tickers))}
-    )
+    return pd.DataFrame({"Ticker": list(tickers), "Date_Added": pd.to_datetime([date_added] * len(tickers))})
 
 
 def synthetic_panel() -> pd.DataFrame:
@@ -65,14 +63,16 @@ def test_join_date_truncates_pre_membership_rows(monkeypatch):
 
     aaa = master_df[master_df["Ticker"] == "AAA"]
     bbb = master_df[master_df["Ticker"] == "BBB"]
-    assert len(aaa) == N_DAYS                      # unknown join date: full history
-    assert bbb.index.min() == joined               # member only from its join date
+    assert len(aaa) == N_DAYS  # unknown join date: full history
+    assert bbb.index.min() == joined  # member only from its join date
     assert len(bbb) == N_DAYS - 30
     # Features on the join day still use the pre-join price history: the
     # 20-day rolling windows are already warm, so the first row is complete.
     assert bbb.iloc[0][FEATURE_COLUMNS].notna().all()
     assert metadata["join_date_truncation"] == {
-        "applied": True, "n_tickers_truncated": 1, "n_tickers_unknown_join_date": 1,
+        "applied": True,
+        "n_tickers_truncated": 1,
+        "n_tickers_unknown_join_date": 1,
     }
 
 
@@ -90,6 +90,7 @@ def test_volume_is_not_forward_filled():
             return panel.copy()
 
     import screener as mod
+
     original = mod.yf
     mod.yf = FakeYF
     try:
@@ -174,17 +175,17 @@ def test_score_and_rank_labels_both_pools():
     focus = screener.score_and_rank(ConstantModel(), latest)
     assert (focus["Signal_Pool"] == screener.LONG_POOL).sum() == screener.TOP_N_CANDIDATES
     assert (focus["Signal_Pool"] == screener.SHORT_POOL).sum() == screener.BOTTOM_N_CANDIDATES
-    assert focus.loc[focus["Signal_Pool"] == screener.LONG_POOL, "Probability"].min() > \
-        focus.loc[focus["Signal_Pool"] == screener.SHORT_POOL, "Probability"].max()
+    assert (
+        focus.loc[focus["Signal_Pool"] == screener.LONG_POOL, "Probability"].min()
+        > focus.loc[focus["Signal_Pool"] == screener.SHORT_POOL, "Probability"].max()
+    )
 
 
 def test_train_model_smoke_without_dates_uses_ceiling():
     pytest.importorskip("xgboost")
     rng = np.random.default_rng(1)
     n = 200
-    train_df = pd.DataFrame(
-        rng.normal(size=(n, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS
-    )
+    train_df = pd.DataFrame(rng.normal(size=(n, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS)
     train_df["Target"] = rng.integers(0, 2, n).astype(float)
 
     assert screener.choose_n_estimators(train_df) is None  # RangeIndex: no slice
