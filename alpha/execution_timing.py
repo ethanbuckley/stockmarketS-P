@@ -19,6 +19,7 @@ Gain per unit traded = -sign(trade) * r_overnight when we choose the open.
 We only get the predictable part of that, so the realised gain scales with the
 overnight model's skill, not with |r_overnight|.
 """
+
 from __future__ import annotations
 
 import sys
@@ -35,7 +36,7 @@ from alpha.decomposed import build_panel, rank_x  # noqa: E402
 from alpha.lab import weights_from_scores  # noqa: E402
 
 TEST = list(range(2020, 2027))
-LPS = ["on_lag1","id_lag1","on_5","id_5","on_21","id_21","on_ewma","id_ewma","tug","tug_21"]
+LPS = ["on_lag1", "id_lag1", "on_5", "id_5", "on_21", "id_21", "on_ewma", "id_ewma", "tug", "tug_21"]
 
 
 def oos_pred(X, y, years, dates):
@@ -63,11 +64,9 @@ def main():
     p_on = oos_pred(rank_x(df, feats).values, df["y_on"].values, years, dates)
 
     m = np.isin(years, TEST)
-    d = pd.DataFrame({"d": dates[m], "t": tick[m], "p": p_cc[m],
-                      "pon": p_on[m], "ron": df["y_on"].values[m]}).dropna()
+    d = pd.DataFrame({"d": dates[m], "t": tick[m], "p": p_cc[m], "pon": p_on[m], "ron": df["y_on"].values[m]}).dropna()
     d = d.sort_values(["t", "d"])
-    d["p"] = d.groupby("t", observed=True)["p"].transform(
-        lambda x: x.rolling(20, min_periods=1).mean())
+    d["p"] = d.groupby("t", observed=True)["p"].transform(lambda x: x.rolling(20, min_periods=1).mean())
 
     d["w"] = weights_from_scores(d["p"].values, d["d"].values)
     d = d.sort_values(["t", "d"])
@@ -87,24 +86,26 @@ def main():
     daily = pd.Series(gain, index=d["d"].values).groupby(level=0).sum()
 
     # benchmarks: always close (0 by construction), always open, perfect foresight
-    always_open = pd.Series(-np.sign(d["dw"].values) * d["ron"].values * d["dw"].abs().values,
-                            index=d["d"].values).groupby(level=0).sum()
-    perfect = pd.Series(np.abs(d["ron"].values) * d["dw"].abs().values,
-                        index=d["d"].values).groupby(level=0).sum()
+    always_open = (
+        pd.Series(-np.sign(d["dw"].values) * d["ron"].values * d["dw"].abs().values, index=d["d"].values)
+        .groupby(level=0)
+        .sum()
+    )
+    perfect = pd.Series(np.abs(d["ron"].values) * d["dw"].abs().values, index=d["d"].values).groupby(level=0).sum()
 
     print(f"\n{'execution rule':<34}{'bps/day':>10}{'bps/yr':>10}")
-    for name, s in (("always trade at the close", pd.Series(0.0, index=daily.index)),
-                    ("always trade at the open", always_open),
-                    ("model-timed (open vs close)", daily),
-                    ("perfect foresight (ceiling)", perfect)):
-        print(f"{name:<34}{s.mean()*1e4:>10.3f}{s.mean()*252*1e4:>10.1f}")
+    for name, s in (
+        ("always trade at the close", pd.Series(0.0, index=daily.index)),
+        ("always trade at the open", always_open),
+        ("model-timed (open vs close)", daily),
+        ("perfect foresight (ceiling)", perfect),
+    ):
+        print(f"{name:<34}{s.mean() * 1e4:>10.3f}{s.mean() * 252 * 1e4:>10.1f}")
 
     t = daily.mean() / (daily.std(ddof=1) / np.sqrt(len(daily)))
-    print(f"\nmodel-timed gain t-stat = {t:.2f}   "
-          f"({100*use_open.mean():.0f}% of trades routed to the open)")
-    print(f"share of the perfect-foresight ceiling captured: "
-          f"{daily.mean()/perfect.mean()*100:.1f}%")
-    print(f"\ntotal {time.time()-t0:.0f}s")
+    print(f"\nmodel-timed gain t-stat = {t:.2f}   ({100 * use_open.mean():.0f}% of trades routed to the open)")
+    print(f"share of the perfect-foresight ceiling captured: {daily.mean() / perfect.mean() * 100:.1f}%")
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

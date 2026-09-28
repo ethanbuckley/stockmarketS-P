@@ -5,6 +5,7 @@ tradeable dollar-neutral book rather than as a classifier.
 Reads the OHLCV+feature panel from stockmarketS-P-main/master_cache.pkl.
 Read-only: nothing here writes to that repo.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -18,11 +19,32 @@ warnings.filterwarnings("ignore")
 CACHE = Path.home() / "Documents/GitHub/stockmarketS-P-main/master_cache.pkl"
 ANN = np.sqrt(252.0)
 
-MARKET_WIDE = ["Day_Of_Week","SPY_Return","QQQ_Return","SMH_Return","VIX_Change",
-               "TNX_Change","QQQ_Lag_1","QQQ_Lag_2","QQQ_Lag_3"]
-STOCK_SPECIFIC = ["RSI","MACD","BB_Position","Price_to_VWAP","ATR_Ratio","Return",
-                  "Volume_Surge","Rel_SPY","Rel_QQQ","Rel_SMH",
-                  "Return_Lag_1","Return_Lag_2","Return_Lag_3"]
+MARKET_WIDE = [
+    "Day_Of_Week",
+    "SPY_Return",
+    "QQQ_Return",
+    "SMH_Return",
+    "VIX_Change",
+    "TNX_Change",
+    "QQQ_Lag_1",
+    "QQQ_Lag_2",
+    "QQQ_Lag_3",
+]
+STOCK_SPECIFIC = [
+    "RSI",
+    "MACD",
+    "BB_Position",
+    "Price_to_VWAP",
+    "ATR_Ratio",
+    "Return",
+    "Volume_Surge",
+    "Rel_SPY",
+    "Rel_QQQ",
+    "Rel_SMH",
+    "Return_Lag_1",
+    "Return_Lag_2",
+    "Return_Lag_3",
+]
 
 
 # ------------------------------------------------------------------ data
@@ -53,6 +75,7 @@ def load_panel() -> tuple[pd.DataFrame, dict]:
     def _wins(s):
         lo, hi = s.quantile(0.005), s.quantile(0.995)
         return s.clip(lo, hi)
+
     df["fwd_ret"] = df.groupby("Date", observed=True)["fwd_ret"].transform(_wins)
 
     # cross-sectional demean -> the alpha target (market factor removed)
@@ -85,15 +108,19 @@ def weights_from_scores(scores: np.ndarray, dates: np.ndarray) -> np.ndarray:
 
 
 def turnover_series(w: np.ndarray, dates: np.ndarray, tickers: np.ndarray) -> pd.Series:
-    wide = pd.DataFrame({"d": dates, "t": tickers, "w": w}).pivot_table(
-        index="d", columns="t", values="w").fillna(0.0).sort_index()
+    wide = (
+        pd.DataFrame({"d": dates, "t": tickers, "w": w})
+        .pivot_table(index="d", columns="t", values="w")
+        .fillna(0.0)
+        .sort_index()
+    )
     return wide.diff().abs().sum(axis=1)
 
 
 def evaluate(pred, actual, dates, tickers, name, cost_bps=(0.0, 1.0, 2.0, 5.0)):
     d = pd.DataFrame({"p": pred, "a": actual, "d": dates, "t": tickers}).dropna()
     gb = d.groupby("d")
-    ic  = gb.apply(lambda x: x["p"].corr(x["a"]))
+    ic = gb.apply(lambda x: x["p"].corr(x["a"]))
     ric = gb.apply(lambda x: x["p"].corr(x["a"], method="spearman"))
 
     w = weights_from_scores(d["p"].values, d["d"].values)
@@ -101,8 +128,10 @@ def evaluate(pred, actual, dates, tickers, name, cost_bps=(0.0, 1.0, 2.0, 5.0)):
     turn = turnover_series(w, d["d"].values, d["t"].values).reindex(pnl.index).fillna(0.0)
 
     row = {
-        "model": name, "days": int(len(pnl)),
-        "mean_IC": ic.mean(), "IC_t": ic.mean() / (ic.std(ddof=1) / np.sqrt(len(ic))),
+        "model": name,
+        "days": int(len(pnl)),
+        "mean_IC": ic.mean(),
+        "IC_t": ic.mean() / (ic.std(ddof=1) / np.sqrt(len(ic))),
         "rankIC": ric.mean(),
         "gross_bps": pnl.mean() * 1e4,
         "gross_SR": pnl.mean() / pnl.std(ddof=1) * ANN,

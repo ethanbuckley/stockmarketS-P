@@ -13,6 +13,7 @@ conditional on entitlement.
 `baseline` is run BEFORE the WRDS data arrives and stored, so Test B is a
 paired comparison on identical dates rather than two unanchored estimates.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,12 +40,12 @@ CONFIRM_JSON = RESULTS / "prereg_confirmatory.json"
 RIDGE_ALPHA = 100.0
 TEST_YEARS = list(range(2020, 2027))
 SMOOTH = 1
-WEIGHT_QUANTILE = 10          # equal-weight top/bottom decile
-GROSS_TRADED_PER_DAY = 2.0    # in at the close, out at the open
+WEIGHT_QUANTILE = 10  # equal-weight top/bottom decile
+GROSS_TRADED_PER_DAY = 2.0  # in at the close, out at the open
 WINSOR = (0.005, 0.995)
 MIN_PRICE = 5.0
 MIN_DOLLAR_VOLUME = 1e6
-DSR_PASS_N = 108              # every trial already spent
+DSR_PASS_N = 108  # every trial already spent
 DSR_THRESHOLD = 0.95
 TEST_A_T_THRESHOLD = -2.0
 EULER = 0.5772156649015329
@@ -102,18 +103,18 @@ def block_bootstrap_ci(x: np.ndarray, block: int = 20, reps: int = 4000, seed: i
     out = []
     for _ in range(reps):
         st = rng.integers(0, max(T - block, 1), nb)
-        out.append(np.concatenate([x[s:s + block] for s in st]).mean())
+        out.append(np.concatenate([x[s : s + block] for s in st]).mean())
     return float(np.percentile(out, 2.5)), float(np.percentile(out, 97.5))
 
 
 # -------------------------------------------------------------------- gates
-def run_gates(df: pd.DataFrame, membership: pd.DataFrame | None,
-              known_tickers: set[str], arm: str) -> dict:
+def run_gates(df: pd.DataFrame, membership: pd.DataFrame | None, known_tickers: set[str], arm: str) -> dict:
     g = {}
     chk = ((1 + df["r_overnight"]) * (1 + df["r_intraday"]) - 1 - df["r_cc"]).abs()
     g["decomposition_identity"] = {
         "value": float(chk.max()) if chk.notna().any() else 0.0,
-        "pass": bool((chk.max() if chk.notna().any() else 0.0) < GATE_DECOMP_TOL)}
+        "pass": bool((chk.max() if chk.notna().any() else 0.0) < GATE_DECOMP_TOL),
+    }
 
     npd = float(df.groupby("Date").size().median())
     g["names_per_day"] = {"value": npd, "pass": bool(npd >= GATE_MIN_NAMES_PER_DAY)}
@@ -125,16 +126,13 @@ def run_gates(df: pd.DataFrame, membership: pd.DataFrame | None,
     if arm == "confirmatory":
         if membership is not None and len(membership):
             have = set(df["Ticker"].unique())
-            by = (membership.assign(h=membership["Ticker"].isin(have))
-                            .groupby(membership["asof"].dt.year)["h"].mean())
+            by = membership.assign(h=membership["Ticker"].isin(have)).groupby(membership["asof"].dt.year)["h"].mean()
             worst = float(by.min())
-            g["pit_coverage_min_year"] = {"value": round(worst, 4),
-                                          "pass": bool(worst >= GATE_MIN_COVERAGE)}
+            g["pit_coverage_min_year"] = {"value": round(worst, 4), "pass": bool(worst >= GATE_MIN_COVERAGE)}
         else:
             g["pit_coverage_min_year"] = {"value": None, "pass": False}
         new = len(set(df["Ticker"].unique()) - known_tickers)
-        g["delisted_tickers_present"] = {"value": new,
-                                         "pass": bool(new >= GATE_MIN_NEW_TICKERS)}
+        g["delisted_tickers_present"] = {"value": new, "pass": bool(new >= GATE_MIN_NEW_TICKERS)}
     else:
         g["pit_coverage_min_year"] = {"value": "n/a (confirmatory only)", "pass": True}
         g["delisted_tickers_present"] = {"value": "n/a (confirmatory only)", "pass": True}
@@ -145,8 +143,7 @@ def run_gates(df: pd.DataFrame, membership: pd.DataFrame | None,
 def frozen_panel(price_files: list[Path], membership: pd.DataFrame | None) -> pd.DataFrame:
     df = pd.concat([pd.read_parquet(p) for p in price_files], ignore_index=True)
     df["Date"] = pd.to_datetime(df["Date"]).astype("datetime64[ns]")
-    df = (df.sort_values(["Ticker", "Date"])
-            .drop_duplicates(["Ticker", "Date"], keep="first").reset_index(drop=True))
+    df = df.sort_values(["Ticker", "Date"]).drop_duplicates(["Ticker", "Date"], keep="first").reset_index(drop=True)
     df["dv"] = df["Close"] * df["Volume"]
     df = df[(df["Close"] >= MIN_PRICE) & (df["Volume"] > 0)]
     med = df.groupby("Ticker", observed=True)["dv"].transform("median")
@@ -157,16 +154,14 @@ def frozen_panel(price_files: list[Path], membership: pd.DataFrame | None) -> pd
         df[f"{tag}_lag1"] = g[col].shift(1)
         df[f"{tag}_5"] = g[col].transform(lambda s: s.shift(1).rolling(5).sum())
         df[f"{tag}_21"] = g[col].transform(lambda s: s.shift(1).rolling(21).sum())
-        df[f"{tag}_ewma"] = g[col].transform(
-            lambda s: s.shift(1).ewm(halflife=60, min_periods=21).mean())
+        df[f"{tag}_ewma"] = g[col].transform(lambda s: s.shift(1).ewm(halflife=60, min_periods=21).mean())
     df["tug"] = df["on_ewma"] - df["id_ewma"]
     df["tug_21"] = df["on_21"] - df["id_21"]
     df["ret_lag1"] = g["r_cc"].shift(1)
     df["ret_lag2"] = g["r_cc"].shift(2)
     df["ret_5"] = g["r_cc"].transform(lambda s: s.shift(1).rolling(5).sum())
     df["vol_21"] = g["r_cc"].transform(lambda s: s.shift(1).rolling(21).std())
-    df["vol_surge"] = df["Volume"] / g["Volume"].transform(
-        lambda s: s.shift(1).rolling(21).mean())
+    df["vol_surge"] = df["Volume"] / g["Volume"].transform(lambda s: s.shift(1).rolling(21).mean())
     df["dv_rank"] = df.groupby("Date", observed=True)["dv"].rank(pct=True)
 
     cal = pd.Index(sorted(df["Date"].unique()))
@@ -176,21 +171,29 @@ def frozen_panel(price_files: list[Path], membership: pd.DataFrame | None) -> pd
     df["y_on"] = g["r_overnight"].shift(-1).where(ok)
     df = df.dropna(subset=FEATS + ["y_on"])
     df["y_on"] = df.groupby("Date", observed=True)["y_on"].transform(
-        lambda s: s.clip(s.quantile(WINSOR[0]), s.quantile(WINSOR[1])))
+        lambda s: s.clip(s.quantile(WINSOR[0]), s.quantile(WINSOR[1]))
+    )
     df["y_on"] = df["y_on"] - df.groupby("Date", observed=True)["y_on"].transform("mean")
 
     if membership is not None and len(membership):
         m = membership[["asof", "Ticker"]].copy()
         m["is_member"] = True
-        df = pd.merge_asof(df.sort_values("Date"), m.sort_values("asof"),
-                           left_on="Date", right_on="asof", by="Ticker",
-                           direction="backward", tolerance=pd.Timedelta("200D"))
+        df = pd.merge_asof(
+            df.sort_values("Date"),
+            m.sort_values("asof"),
+            left_on="Date",
+            right_on="asof",
+            by="Ticker",
+            direction="backward",
+            tolerance=pd.Timedelta("200D"),
+        )
         df = df[df["is_member"].fillna(False).astype(bool)]
     return df.reset_index(drop=True)
 
 
 def run_arm(arm: str) -> dict:
     from alpha.source import membership_file, price_files
+
     t0 = time.time()
     memb = pd.read_parquet(membership_file()) if membership_file().exists() else None
     if memb is not None:
@@ -219,13 +222,20 @@ def run_arm(arm: str) -> dict:
     p = oos_pred(X, y, years, dates)
     m = np.isin(years, TEST_YEARS)
     pnl = decile_pnl(p[m], y[m], dates[m])
-    ic = (pd.DataFrame({"p": p[m], "a": y[m], "d": dates[m]}).dropna()
-            .groupby("d").apply(lambda x: x["p"].corr(x["a"]), include_groups=False))
+    ic = (
+        pd.DataFrame({"p": p[m], "a": y[m], "d": dates[m]})
+        .dropna()
+        .groupby("d")
+        .apply(lambda x: x["p"].corr(x["a"]), include_groups=False)
+    )
 
     gross = float(pnl.mean() * 1e4)
     out = {
-        "arm": arm, "gates": gates, "tests_run": True,
-        "days": int(len(pnl)), "names_per_day": float(df.groupby("Date").size().median()),
+        "arm": arm,
+        "gates": gates,
+        "tests_run": True,
+        "days": int(len(pnl)),
+        "names_per_day": float(df.groupby("Date").size().median()),
         "tickers": int(df["Ticker"].nunique()),
         "mean_IC": float(ic.mean()),
         "IC_t": float(ic.mean() / (ic.std(ddof=1) / np.sqrt(len(ic)))),
@@ -241,27 +251,27 @@ def run_arm(arm: str) -> dict:
     res = spread(mc, "on")
     est = float(res["id"]["spread"].mean() * 100)
     t = float(nw_tstat(res["id"]["spread"].values))
-    out["test_A"] = {"estimate_pct_per_month": est, "nw_t": t,
-                     "pass": bool(est < 0 and t < TEST_A_T_THRESHOLD)}
+    out["test_A"] = {"estimate_pct_per_month": est, "nw_t": t, "pass": bool(est < 0 and t < TEST_A_T_THRESHOLD)}
 
     # Test C - deflated Sharpe
     sd_sr = sd_sr_from_prior_search()
-    out["test_C"] = {"DSR_N108": deflated_sharpe(pnl, sd_sr, DSR_PASS_N),
-                     "DSR_N2": deflated_sharpe(pnl, sd_sr, 2),
-                     "pass": bool(deflated_sharpe(pnl, sd_sr, DSR_PASS_N) >= DSR_THRESHOLD)}
+    out["test_C"] = {
+        "DSR_N108": deflated_sharpe(pnl, sd_sr, DSR_PASS_N),
+        "DSR_N2": deflated_sharpe(pnl, sd_sr, 2),
+        "pass": bool(deflated_sharpe(pnl, sd_sr, DSR_PASS_N) >= DSR_THRESHOLD),
+    }
 
     print(f"\n=== frozen configuration, arm = {arm} ===")
-    print(f"  days {out['days']}  tickers {out['tickers']}  "
-          f"names/day {out['names_per_day']:.0f}")
-    print(f"  IC {out['mean_IC']:.4f} (t={out['IC_t']:.2f})   "
-          f"gross {gross:.3f} bps/day   SR {out['gross_SR_ann']:.2f}")
+    print(f"  days {out['days']}  tickers {out['tickers']}  names/day {out['names_per_day']:.0f}")
+    print(f"  IC {out['mean_IC']:.4f} (t={out['IC_t']:.2f})   gross {gross:.3f} bps/day   SR {out['gross_SR_ann']:.2f}")
     print(f"  BREAK-EVEN {out['break_even_bps_side']:.2f} bps/side")
-    print(f"\n  Test A  LPS Panel A: {est:+.2f}%/mo  t={t:.2f}   "
-          f"{'PASS' if out['test_A']['pass'] else 'FAIL'}")
-    print(f"  Test C  DSR@N=108 {out['test_C']['DSR_N108']:.3f} "
-          f"(N=2: {out['test_C']['DSR_N2']:.3f})   "
-          f"{'PASS' if out['test_C']['pass'] else 'FAIL'}")
-    print(f"\n  {time.time()-t0:.0f}s")
+    print(f"\n  Test A  LPS Panel A: {est:+.2f}%/mo  t={t:.2f}   {'PASS' if out['test_A']['pass'] else 'FAIL'}")
+    print(
+        f"  Test C  DSR@N=108 {out['test_C']['DSR_N108']:.3f} "
+        f"(N=2: {out['test_C']['DSR_N2']:.3f})   "
+        f"{'PASS' if out['test_C']['pass'] else 'FAIL'}"
+    )
+    print(f"\n  {time.time() - t0:.0f}s")
     return out
 
 
@@ -272,10 +282,13 @@ def test_b(baseline: dict, confirm: dict) -> dict:
     common = b.index.intersection(c.index)
     d = (c[common] - b[common]).values * 1e4 / GROSS_TRADED_PER_DAY
     lo, hi = block_bootstrap_ci(d)
-    return {"delta_break_even_bps_side": float(d.mean()), "ci95": [lo, hi],
-            "paired_days": int(len(common)),
-            "baseline_break_even": baseline["break_even_bps_side"],
-            "confirmatory_break_even": confirm["break_even_bps_side"]}
+    return {
+        "delta_break_even_bps_side": float(d.mean()),
+        "ci95": [lo, hi],
+        "paired_days": int(len(common)),
+        "baseline_break_even": baseline["break_even_bps_side"],
+        "confirmatory_break_even": confirm["break_even_bps_side"],
+    }
 
 
 if __name__ == "__main__":
@@ -295,8 +308,10 @@ if __name__ == "__main__":
             print("\n=== Test B - what the DELISTED half of survivorship bias is worth ===")
             print(f"  survivors-only break-even   {tb['baseline_break_even']:.2f} bps/side")
             print(f"  survivorship-free break-even {tb['confirmatory_break_even']:.2f} bps/side")
-            print(f"  delta {tb['delta_break_even_bps_side']:+.3f} "
-                  f"95% CI [{tb['ci95'][0]:+.3f}, {tb['ci95'][1]:+.3f}]  "
-                  f"over {tb['paired_days']} paired days")
+            print(
+                f"  delta {tb['delta_break_even_bps_side']:+.3f} "
+                f"95% CI [{tb['ci95'][0]:+.3f}, {tb['ci95'][1]:+.3f}]  "
+                f"over {tb['paired_days']} paired days"
+            )
             out["test_B"] = tb
             dest.write_text(json.dumps(out, indent=2))

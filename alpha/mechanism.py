@@ -17,6 +17,7 @@ Three tests:
   B. do ownership features improve the overnight model?
   C. does restricting the book to high-ownership names raise break-even cost?
 """
+
 from __future__ import annotations
 
 import sys
@@ -67,8 +68,11 @@ def main():
     df, feats = build_panel()
     df = attach(df)
     cov = df["io"].notna().mean()
-    print(f"panel {len(df):,} rows | ownership coverage {cov:.1%} | "
-          f"median staleness {df['ownership_age_days'].median():.0f} days", flush=True)
+    print(
+        f"panel {len(df):,} rows | ownership coverage {cov:.1%} | "
+        f"median staleness {df['ownership_age_days'].median():.0f} days",
+        flush=True,
+    )
     df = df[df["io"].notna()].reset_index(drop=True)
 
     years = df["Date"].dt.year.values
@@ -86,9 +90,9 @@ def main():
     terciles = {}
     for var in ("io", "breadth"):
         terciles[var] = df.groupby("Date", observed=True)[var].transform(
-            lambda s: pd.qcut(s.rank(method="first"), 3, labels=["low", "mid", "high"]))
-    print(f"\n(io capped at 1.0 for {df['io_capped'].mean():.1%} of rows; "
-          f"breadth is the denominator-free check)")
+            lambda s: pd.qcut(s.rank(method="first"), 3, labels=["low", "mid", "high"])
+        )
+    print(f"\n(io capped at 1.0 for {df['io_capped'].mean():.1%} of rows; breadth is the denominator-free check)")
     for var in ("io", "breadth"):
         print(f"\n=== A) overnight IC by {var} tercile ===")
         rows = []
@@ -97,8 +101,11 @@ def main():
             r, *_ = evaluate(p[sel], y[sel], dates[sel], tick[sel], f"{var} {t}")
             r["mean_" + var] = df.loc[sel, var].mean()
             rows.append(r)
-        print(pd.DataFrame(rows)[["model", "mean_" + var, "mean_IC", "IC_t", "gross_SR"]]
-              .to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
+        print(
+            pd.DataFrame(rows)[["model", "mean_" + var, "mean_IC", "IC_t", "gross_SR"]].to_string(
+                index=False, float_format=lambda v: f"{v:,.4f}"
+            )
+        )
     ter = terciles["io"]
 
     # ---- B) do ownership features improve the model? -----------------------
@@ -109,23 +116,28 @@ def main():
         pp = oos_pred(X, y, years, dates)
         r, *_ = evaluate(pp[m], y[m], dates[m], tick[m], name)
         rows.append(r)
-    print(pd.DataFrame(rows)[["model", "mean_IC", "IC_t", "gross_bps", "gross_SR"]]
-          .to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
+    print(
+        pd.DataFrame(rows)[["model", "mean_IC", "IC_t", "gross_bps", "gross_SR"]].to_string(
+            index=False, float_format=lambda v: f"{v:,.4f}"
+        )
+    )
 
     # ---- C) does restricting to high-ownership names pay? ------------------
     print("\n=== C) overnight book, decile weights, gross traded 2.0/day ===")
     print(f"{'universe':<28}{'names/day':>11}{'gross bps/day':>15}{'break-even bps/side':>22}")
-    for label, sel in (("all names", m),
-                       ("io high tercile", m & (ter.values == "high")),
-                       ("io mid+high", m & (ter.values != "low")),
-                       ("io low tercile", m & (ter.values == "low"))):
+    for label, sel in (
+        ("all names", m),
+        ("io high tercile", m & (ter.values == "high")),
+        ("io mid+high", m & (ter.values != "low")),
+        ("io low tercile", m & (ter.values == "low")),
+    ):
         if sel.sum() == 0:
             continue
         pnl = decile_book(p[sel], y[sel], dates[sel])
         n = pd.Series(dates[sel]).value_counts().mean()
-        print(f"{label:<28}{n:>11.0f}{pnl.mean()*1e4:>15.3f}{pnl.mean()*1e4/2:>22.2f}")
+        print(f"{label:<28}{n:>11.0f}{pnl.mean() * 1e4:>15.3f}{pnl.mean() * 1e4 / 2:>22.2f}")
 
-    print(f"\ntotal {time.time()-t0:.0f}s")
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

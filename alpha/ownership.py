@@ -14,6 +14,7 @@ Measures built per ticker-quarter:
   d_io        quarter-on-quarter change in io
   d_breadth   quarter-on-quarter change in breadth
 """
+
 from __future__ import annotations
 
 import sys
@@ -36,13 +37,13 @@ def quarterly_panel() -> pd.DataFrame:
     own = load_holdings()
     mp = pd.read_csv(REPO / "alpha" / "cusip_map.csv", dtype={"cusip6": str})
 
-    q = (own.merge(mp[["ticker", "cusip6"]], on="cusip6", how="inner")
-            .groupby(["ticker", "period"], observed=True)
-            .agg(inst_shares=("inst_shares", "sum"),
-                 breadth=("breadth", "sum"),
-                 inst_dollars=("inst_dollars", "sum"))
-            .reset_index()
-            .rename(columns={"ticker": "Ticker"}))
+    q = (
+        own.merge(mp[["ticker", "cusip6"]], on="cusip6", how="inner")
+        .groupby(["ticker", "period"], observed=True)
+        .agg(inst_shares=("inst_shares", "sum"), breadth=("breadth", "sum"), inst_dollars=("inst_dollars", "sum"))
+        .reset_index()
+        .rename(columns={"ticker": "Ticker"})
+    )
 
     so = pd.read_parquet(REPO / "alpha" / "shares_outstanding.parquet")
     # merge_asof refuses mismatched datetime resolutions (us vs ms)
@@ -50,10 +51,14 @@ def quarterly_panel() -> pd.DataFrame:
     so["Date"] = so["Date"].astype("datetime64[ns]")
     q = q.sort_values(["Ticker", "period"])
     so = so.sort_values(["Ticker", "Date"])
-    q = pd.merge_asof(q.sort_values("period"),
-                      so.rename(columns={"Date": "period"}).sort_values("period"),
-                      on="period", by="Ticker", direction="nearest",
-                      tolerance=pd.Timedelta("120D"))
+    q = pd.merge_asof(
+        q.sort_values("period"),
+        so.rename(columns={"Date": "period"}).sort_values("period"),
+        on="period",
+        by="Ticker",
+        direction="nearest",
+        tolerance=pd.Timedelta("120D"),
+    )
 
     # 13F CO-MANAGER DOUBLE COUNTING. When several managers share investment
     # discretion over a block, each may report it, so summed institutional
@@ -66,7 +71,7 @@ def quarterly_panel() -> pd.DataFrame:
     q["io_raw"] = q["inst_shares"] / q["shares"]
     q["io_capped"] = q["io_raw"] > 1.0
     q["io"] = q["io_raw"].clip(upper=1.0)
-    q.loc[q["io_raw"] <= 0.01, "io"] = np.nan   # failed denominator or no match
+    q.loc[q["io_raw"] <= 0.01, "io"] = np.nan  # failed denominator or no match
     g = q.groupby("Ticker", observed=True)
     q["d_io"] = g["io"].diff()
     q["d_breadth"] = g["breadth"].pct_change()
@@ -82,21 +87,28 @@ def attach(daily: pd.DataFrame) -> pd.DataFrame:
     daily["Date"] = daily["Date"].astype("datetime64[ns]")
     q["available"] = q["available"].astype("datetime64[ns]")
     left = daily.sort_values("Date")
-    out = pd.merge_asof(left, q[cols].sort_values("available"),
-                        left_on="Date", right_on="available", by="Ticker",
-                        direction="backward", tolerance=pd.Timedelta("200D"))
+    out = pd.merge_asof(
+        left,
+        q[cols].sort_values("available"),
+        left_on="Date",
+        right_on="available",
+        by="Ticker",
+        direction="backward",
+        tolerance=pd.Timedelta("200D"),
+    )
     out["ownership_age_days"] = (out["Date"] - out["available"]).dt.days
     return out
 
 
 if __name__ == "__main__":
     q = quarterly_panel()
-    print(f"ticker-quarters={len(q):,}  tickers={q.Ticker.nunique()}  "
-          f"{q.period.min().date()} -> {q.period.max().date()}")
+    print(
+        f"ticker-quarters={len(q):,}  tickers={q.Ticker.nunique()}  {q.period.min().date()} -> {q.period.max().date()}"
+    )
     print("\ninstitutional ownership (io) distribution:")
-    print(q["io"].describe(percentiles=[.05, .25, .5, .75, .95]).round(3).to_string())
+    print(q["io"].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).round(3).to_string())
     print("\nbreadth (number of 13F filers):")
-    print(q["breadth"].describe(percentiles=[.05, .5, .95]).round(0).to_string())
+    print(q["breadth"].describe(percentiles=[0.05, 0.5, 0.95]).round(0).to_string())
     print("\nhighest and lowest io, latest quarter:")
     last = q[q.period == q.period.max()].sort_values("io")
     print("  low :", ", ".join(f"{r.Ticker}={r.io:.2f}" for r in last.head(4).itertuples()))

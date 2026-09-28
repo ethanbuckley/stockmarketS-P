@@ -23,6 +23,7 @@ after deflation; below 0.95 the result does not survive its own search.
 
 All Sharpes here are in per-period (daily) units, as the formula requires.
 """
+
 from __future__ import annotations
 
 import sys
@@ -68,8 +69,7 @@ def book(scores, actual, dates, tickers, smooth, scheme):
     d = pd.DataFrame({"p": scores, "a": actual, "d": dates, "t": tickers}).dropna()
     if smooth > 1:
         d = d.sort_values(["t", "d"])
-        d["p"] = d.groupby("t", observed=True)["p"].transform(
-            lambda x, k=smooth: x.rolling(k, min_periods=1).mean())
+        d["p"] = d.groupby("t", observed=True)["p"].transform(lambda x, k=smooth: x.rolling(k, min_periods=1).mean())
     s = pd.Series(d["p"].values, index=d["d"].values)
     if scheme == "proportional":
         w = s - s.groupby(level=0).transform("mean")
@@ -81,17 +81,16 @@ def book(scores, actual, dates, tickers, smooth, scheme):
         w[r <= 1 / q] = -1.0
     g = w.abs().groupby(level=0).transform("sum").replace(0, np.nan)
     w = w / g
-    return pd.DataFrame({"d": d["d"].values,
-                         "x": w.values * d["a"].values}).groupby("d")["x"].sum()
+    return pd.DataFrame({"d": d["d"].values, "x": w.values * d["a"].values}).groupby("d")["x"].sum()
 
 
 def deflated_sharpe(pnl: pd.Series, sr_trials: np.ndarray, n_trials: int) -> dict:
     """DSR for one strategy given the spread of Sharpes across the grid."""
     x = pnl.dropna().values
     T = len(x)
-    sr = x.mean() / x.std(ddof=1)                       # daily units
+    sr = x.mean() / x.std(ddof=1)  # daily units
     skew = pd.Series(x).skew()
-    kurt = pd.Series(x).kurtosis() + 3.0                # scipy/pandas give excess
+    kurt = pd.Series(x).kurtosis() + 3.0  # scipy/pandas give excess
     sd_sr = np.std(sr_trials, ddof=1)
 
     z1 = norm.ppf(1.0 - 1.0 / n_trials)
@@ -100,9 +99,18 @@ def deflated_sharpe(pnl: pd.Series, sr_trials: np.ndarray, n_trials: int) -> dic
 
     denom = np.sqrt(max(1.0 - skew * sr + (kurt - 1.0) / 4.0 * sr**2, 1e-12))
     dsr = norm.cdf((sr - sr0) * np.sqrt(T - 1) / denom)
-    return {"SR_daily": sr, "SR_ann": sr * ANN, "SR0_daily": sr0,
-            "SR0_ann": sr0 * ANN, "sd_SR_trials": sd_sr, "N": n_trials,
-            "T": T, "skew": skew, "kurtosis": kurt, "DSR": dsr}
+    return {
+        "SR_daily": sr,
+        "SR_ann": sr * ANN,
+        "SR0_daily": sr0,
+        "SR0_ann": sr0 * ANN,
+        "sd_SR_trials": sd_sr,
+        "N": n_trials,
+        "T": T,
+        "skew": skew,
+        "kurtosis": kurt,
+        "DSR": dsr,
+    }
 
 
 def main():
@@ -131,13 +139,20 @@ def main():
                         pnl = book(p[sel], y[sel], dates[sel], tick[sel], sm, wt)
                         key = f"{uni}|{target}|a{a:g}|s{sm}|{wt}"
                         pnls[key] = pnl
-                        rows.append({"config": key, "universe": uni, "target": target,
-                                     "alpha": a, "smooth": sm, "weight": wt,
-                                     "SR_daily": pnl.mean() / pnl.std(ddof=1),
-                                     "SR_ann": pnl.mean() / pnl.std(ddof=1) * ANN,
-                                     "bps_day": pnl.mean() * 1e4})
-                print(f"  {uni:<4} {target} alpha={a:<6g} done "
-                      f"({time.time()-t0:.0f}s)", flush=True)
+                        rows.append(
+                            {
+                                "config": key,
+                                "universe": uni,
+                                "target": target,
+                                "alpha": a,
+                                "smooth": sm,
+                                "weight": wt,
+                                "SR_daily": pnl.mean() / pnl.std(ddof=1),
+                                "SR_ann": pnl.mean() / pnl.std(ddof=1) * ANN,
+                                "bps_day": pnl.mean() * 1e4,
+                            }
+                        )
+                print(f"  {uni:<4} {target} alpha={a:<6g} done ({time.time() - t0:.0f}s)", flush=True)
 
     res = pd.DataFrame(rows).sort_values("SR_ann", ascending=False)
     res.to_csv(REPO / "alpha" / "results" / "deflated_grid.csv", index=False)
@@ -146,26 +161,31 @@ def main():
     sd_sr_daily = float(np.std(sr_trials, ddof=1))
 
     print(f"\n=== grid actually searched: N = {N} configurations ===")
-    print(f"annualised Sharpe across the grid: "
-          f"min {res.SR_ann.min():.2f}  median {res.SR_ann.median():.2f}  "
-          f"max {res.SR_ann.max():.2f}  sd {res.SR_ann.std(ddof=1):.2f}")
+    print(
+        f"annualised Sharpe across the grid: "
+        f"min {res.SR_ann.min():.2f}  median {res.SR_ann.median():.2f}  "
+        f"max {res.SR_ann.max():.2f}  sd {res.SR_ann.std(ddof=1):.2f}"
+    )
     print("\ntop 5 by Sharpe:")
-    print(res.head(5)[["config", "SR_ann", "bps_day"]]
-          .to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
+    print(res.head(5)[["config", "SR_ann", "bps_day"]].to_string(index=False, float_format=lambda v: f"{v:,.3f}"))
 
     print("\n=== deflated Sharpe ===")
-    print(f"{'strategy':<34}{'SR ann':>9}{'SR0 ann':>10}{'skew':>8}{'kurt':>8}"
-          f"{'DSR':>9}{'verdict':>12}")
-    headline = [res.iloc[0]["config"],
-                "pit|y_on|a100|s1|decile", "all|y_on|a100|s1|decile",
-                "pit|y_cc|a100|s20|proportional"]
+    print(f"{'strategy':<34}{'SR ann':>9}{'SR0 ann':>10}{'skew':>8}{'kurt':>8}{'DSR':>9}{'verdict':>12}")
+    headline = [
+        res.iloc[0]["config"],
+        "pit|y_on|a100|s1|decile",
+        "all|y_on|a100|s1|decile",
+        "pit|y_cc|a100|s20|proportional",
+    ]
     for key in dict.fromkeys(headline):
         if key not in pnls:
             continue
         d = deflated_sharpe(pnls[key], sr_trials, N)
         verdict = "survives" if d["DSR"] >= 0.95 else "FAILS"
-        print(f"{key:<34}{d['SR_ann']:>9.2f}{d['SR0_ann']:>10.2f}{d['skew']:>8.2f}"
-              f"{d['kurtosis']:>8.1f}{d['DSR']:>9.3f}{verdict:>12}")
+        print(
+            f"{key:<34}{d['SR_ann']:>9.2f}{d['SR0_ann']:>10.2f}{d['skew']:>8.2f}"
+            f"{d['kurtosis']:>8.1f}{d['DSR']:>9.3f}{verdict:>12}"
+        )
     # The 108 grid points are NOT independent: nested models on one dataset.
     # But the real search was wider than the grid (XGBoost, the reversal
     # baseline, the flip, ownership and liquidity terciles, the wide universe).
@@ -190,7 +210,7 @@ def main():
 
     print("\nSR0 is the Sharpe expected from the BEST of N trials under the null.")
     print("DSR >= 0.95 means the result survives its own search.")
-    print(f"\ntotal {time.time()-t0:.0f}s")
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

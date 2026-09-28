@@ -9,6 +9,7 @@ ratio inst_shares / shares_outstanding split-invariant as long as both come
 from the same date. Our price history is split-adjusted, but that does not
 touch this ratio.
 """
+
 from __future__ import annotations
 
 import pickle
@@ -23,6 +24,7 @@ OUT = REPO / "alpha" / "shares_outstanding.parquet"
 
 def fetch(tickers: list[str], pause: float = 0.4) -> pd.DataFrame:
     import yfinance as yf
+
     rows = []
     for i, t in enumerate(tickers, 1):
         try:
@@ -39,9 +41,7 @@ def fetch(tickers: list[str], pause: float = 0.4) -> pd.DataFrame:
         time.sleep(pause)
     df = pd.concat(rows, ignore_index=True)
     df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_localize(None).dt.normalize()
-    return (df.sort_values(["Ticker", "Date"])
-              .drop_duplicates(["Ticker", "Date"], keep="last")
-              .reset_index(drop=True))
+    return df.sort_values(["Ticker", "Date"]).drop_duplicates(["Ticker", "Date"], keep="last").reset_index(drop=True)
 
 
 if __name__ == "__main__":
@@ -52,6 +52,8 @@ if __name__ == "__main__":
     t0 = time.time()
     df = fetch(tk)
     df.to_parquet(OUT, index=False)
-    print(f"rows={len(df):,}  tickers={df.Ticker.nunique()}  "
-          f"{df.Date.min().date()} -> {df.Date.max().date()}  ({time.time()-t0:.0f}s)")
+    print(
+        f"rows={len(df):,}  tickers={df.Ticker.nunique()}  "
+        f"{df.Date.min().date()} -> {df.Date.max().date()}  ({time.time() - t0:.0f}s)"
+    )
     print(f"wrote {OUT}")

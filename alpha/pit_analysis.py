@@ -12,6 +12,7 @@ while growing into the index. It does NOT correct the DELISTED half, because
 Yahoo serves no history for removed tickers. The coverage report below bounds
 what is left uncorrected.
 """
+
 from __future__ import annotations
 
 import sys
@@ -38,10 +39,9 @@ def membership_coverage(panel_tickers: set[str]) -> pd.DataFrame:
     have = ever & panel_tickers
     miss = ever - panel_tickers
     print(f"PIT members ever, 2015-2026 : {len(ever)}")
-    print(f"  with price history        : {len(have)} ({len(have)/len(ever):.0%})")
-    print(f"  MISSING (delisted/renamed): {len(miss)} ({len(miss)/len(ever):.0%})")
-    by = (m.assign(has=m["Ticker"].isin(panel_tickers))
-            .groupby(m["asof"].dt.year)["has"].agg(["size", "mean"]))
+    print(f"  with price history        : {len(have)} ({len(have) / len(ever):.0%})")
+    print(f"  MISSING (delisted/renamed): {len(miss)} ({len(miss) / len(ever):.0%})")
+    by = m.assign(has=m["Ticker"].isin(panel_tickers)).groupby(m["asof"].dt.year)["has"].agg(["size", "mean"])
     by.columns = ["member-quarters", "price coverage"]
     print("\ncoverage of point-in-time members by year:")
     print(by.to_string(float_format=lambda v: f"{v:.1%}"))
@@ -55,9 +55,15 @@ def attach_membership(df: pd.DataFrame, m: pd.DataFrame) -> pd.DataFrame:
     m["is_member"] = True
     df = df.copy()
     df["Date"] = df["Date"].astype("datetime64[ns]")
-    out = pd.merge_asof(df.sort_values("Date"), m.sort_values("asof"),
-                        left_on="Date", right_on="asof", by="Ticker",
-                        direction="backward", tolerance=pd.Timedelta("200D"))
+    out = pd.merge_asof(
+        df.sort_values("Date"),
+        m.sort_values("asof"),
+        left_on="Date",
+        right_on="asof",
+        by="Ticker",
+        direction="backward",
+        tolerance=pd.Timedelta("200D"),
+    )
     out["is_member"] = out["is_member"].fillna(False).astype(bool)
     return out
 
@@ -90,20 +96,20 @@ def main():
     m = membership_coverage(set(df["Ticker"].unique()))
     df = attach_membership(df, m)
     share = df["is_member"].mean()
-    print(f"\npanel rows kept as point-in-time members: {share:.1%} "
-          f"({df['is_member'].sum():,} of {len(df):,})")
+    print(f"\npanel rows kept as point-in-time members: {share:.1%} ({df['is_member'].sum():,} of {len(df):,})")
 
     X = rank_x(df, feats).values
     years = df["Date"].dt.year.values
     dates, tick = df["Date"].values, df["Ticker"].values
 
     print("\n=== headline tests, all names vs point-in-time members ===")
-    print(f"{'target':<10}{'universe':<16}{'names/day':>10}{'IC':>9}{'IC t':>8}"
-          f"{'gross bps':>11}{'gross SR':>10}{'break-even':>12}")
+    print(
+        f"{'target':<10}{'universe':<16}{'names/day':>10}{'IC':>9}{'IC t':>8}"
+        f"{'gross bps':>11}{'gross SR':>10}{'break-even':>12}"
+    )
     for target in ("y_cc", "y_on"):
         y = df[target].values
-        for label, keep in (("all names", np.ones(len(df), bool)),
-                            ("PIT members", df["is_member"].values)):
+        for label, keep in (("all names", np.ones(len(df), bool)), ("PIT members", df["is_member"].values)):
             sub = keep & np.isin(years, TEST)
             p = oos_pred(X[keep], y[keep], years[keep], dates[keep])
             full = np.full(len(df), np.nan)
@@ -111,10 +117,12 @@ def main():
             r, *_ = evaluate(full[sub], y[sub], dates[sub], tick[sub], target)
             pnl = decile_book(full[sub], y[sub], dates[sub])
             n = pd.Series(dates[sub]).value_counts().mean()
-            print(f"{target:<10}{label:<16}{n:>10.0f}{r['mean_IC']:>9.4f}{r['IC_t']:>8.2f}"
-                  f"{pnl.mean()*1e4:>11.3f}{r['gross_SR']:>10.2f}"
-                  f"{pnl.mean()*1e4/2:>12.2f}")
-    print(f"\ntotal {time.time()-t0:.0f}s")
+            print(
+                f"{target:<10}{label:<16}{n:>10.0f}{r['mean_IC']:>9.4f}{r['IC_t']:>8.2f}"
+                f"{pnl.mean() * 1e4:>11.3f}{r['gross_SR']:>10.2f}"
+                f"{pnl.mean() * 1e4 / 2:>12.2f}"
+            )
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ given day, so the intraday leg is adjustment-invariant and the overnight leg
 carries the dividend/split adjustment. That is exactly the convention the
 paper adopts (p.196 n.9: corporate events are assumed to move prices overnight).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,24 +35,23 @@ def tickers_from_cache() -> list[str]:
 
 def download(tickers: list[str], start="2014-12-01", end=None, chunk=40, pause=1.5) -> pd.DataFrame:
     import yfinance as yf
+
     frames = []
     for i in range(0, len(tickers), chunk):
-        part = tickers[i:i + chunk]
+        part = tickers[i : i + chunk]
         for attempt in range(4):
             try:
-                d = yf.download(part, start=start, end=end, auto_adjust=True,
-                                progress=False, threads=False, timeout=30)
+                d = yf.download(part, start=start, end=end, auto_adjust=True, progress=False, threads=False, timeout=30)
                 if d is not None and len(d):
                     frames.append(d)
                 break
             except Exception as e:
-                print(f"   retry {attempt+1} on chunk {i//chunk}: {type(e).__name__}", flush=True)
+                print(f"   retry {attempt + 1} on chunk {i // chunk}: {type(e).__name__}", flush=True)
                 time.sleep(5 * (attempt + 1))
-        print(f"  {min(i+chunk, len(tickers))}/{len(tickers)}", flush=True)
+        print(f"  {min(i + chunk, len(tickers))}/{len(tickers)}", flush=True)
         time.sleep(pause)
     wide = pd.concat(frames, axis=1)
-    long = (wide.stack(level="Ticker", future_stack=True)
-                .rename_axis(["Date", "Ticker"]).reset_index())
+    long = wide.stack(level="Ticker", future_stack=True).rename_axis(["Date", "Ticker"]).reset_index()
     return long.dropna(subset=["Open", "Close"])
 
 
@@ -84,13 +84,12 @@ if __name__ == "__main__":
     a = ap.parse_args()
     tk = tickers_from_cache()
     if a.limit:
-        tk = tk[:a.limit]
+        tk = tk[: a.limit]
     print(f"downloading {len(tk)} tickers ...", flush=True)
     t0 = time.time()
     raw = download(tk)
     out = decompose(raw)
-    print(f"rows={len(out):,}  tickers={out.Ticker.nunique()}  "
-          f"{out.Date.min().date()} -> {out.Date.max().date()}")
+    print(f"rows={len(out):,}  tickers={out.Ticker.nunique()}  {out.Date.min().date()} -> {out.Date.max().date()}")
     print(f"max |(1+on)(1+id)-1 - cc| = {out.attrs['max_decomposition_error']:.2e}")
     out.to_parquet(a.out, index=False)
-    print(f"wrote {a.out}  ({time.time()-t0:.0f}s)")
+    print(f"wrote {a.out}  ({time.time() - t0:.0f}s)")

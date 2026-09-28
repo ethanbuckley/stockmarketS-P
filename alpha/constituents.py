@@ -19,6 +19,7 @@ since companies are added after they have already grown). It cannot resurrect
 price history for companies that were removed and delisted, because Yahoo drops
 those series entirely. See README for what that leaves.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,11 +38,21 @@ UA = {"User-Agent": "alpha-research/0.1 (academic research; contact via GitHub)"
 
 
 def revision_at(ts: pd.Timestamp) -> tuple[int, str] | None:
-    r = requests.get(API, headers=UA, timeout=30, params={
-        "action": "query", "prop": "revisions", "titles": PAGE,
-        "rvlimit": 1, "rvdir": "older",
-        "rvstart": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "rvprop": "ids|timestamp", "format": "json"})
+    r = requests.get(
+        API,
+        headers=UA,
+        timeout=30,
+        params={
+            "action": "query",
+            "prop": "revisions",
+            "titles": PAGE,
+            "rvlimit": 1,
+            "rvdir": "older",
+            "rvstart": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "rvprop": "ids|timestamp",
+            "format": "json",
+        },
+    )
     pages = r.json().get("query", {}).get("pages", {})
     for pg in pages.values():
         revs = pg.get("revisions")
@@ -51,15 +62,19 @@ def revision_at(ts: pd.Timestamp) -> tuple[int, str] | None:
 
 
 def constituents_of(revid: int) -> list[str] | None:
-    html = requests.get(f"https://en.wikipedia.org/w/index.php?oldid={revid}",
-                        headers=UA, timeout=30).text
+    html = requests.get(f"https://en.wikipedia.org/w/index.php?oldid={revid}", headers=UA, timeout=30).text
     for d in pd.read_html(io.StringIO(html)):
         cols = [str(c) for c in d.columns]
         hit = next((c for c in cols if "ymbol" in c or c.strip() in ("Ticker", "Ticker symbol")), None)
         if hit and len(d) > 400:
-            s = (d[hit].astype(str).str.strip().str.upper()
-                 .str.replace(".", "-", regex=False)          # BRK.B -> BRK-B
-                 .str.replace(r"\[.*\]", "", regex=True))
+            s = (
+                d[hit]
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .str.replace(".", "-", regex=False)  # BRK.B -> BRK-B
+                .str.replace(r"\[.*\]", "", regex=True)
+            )
             s = s[s.str.fullmatch(r"[A-Z][A-Z0-9\-]{0,6}")]
             return sorted(set(s))
     return None
@@ -95,6 +110,5 @@ if __name__ == "__main__":
     df = build(a.start)
     df.to_parquet(OUT, index=False)
     n = df.groupby("asof")["Ticker"].size()
-    print(f"\nsnapshots={n.size}  members/snapshot {n.min()}-{n.max()}  "
-          f"distinct tickers ever={df.Ticker.nunique()}")
+    print(f"\nsnapshots={n.size}  members/snapshot {n.min()}-{n.max()}  distinct tickers ever={df.Ticker.nunique()}")
     print(f"wrote {OUT}")

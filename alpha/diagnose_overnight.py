@@ -18,6 +18,7 @@ Three tests:
   3. DROP CLOSE - remove today's close-to-close return and its lags, the
                   features most exposed to a closing-print artefact.
 """
+
 from __future__ import annotations
 
 import sys
@@ -39,7 +40,7 @@ TEST = list(range(2020, 2027))
 def walk(X, y, years, dates, tick, label, extra_lag=False, tickers=None):
     pred = np.full(len(y), np.nan)
     Xv = X.values
-    if extra_lag:                       # shift each ticker's feature row forward 1 day
+    if extra_lag:  # shift each ticker's feature row forward 1 day
         Xdf = X.copy()
         Xdf["_t"] = tickers
         Xv = Xdf.groupby("_t", observed=True)[list(X.columns)].shift(1).values
@@ -68,23 +69,20 @@ def main():
     rows = [walk(X, y, years, dates, tick, "1. baseline overnight")]
 
     # --- test 1: one extra day of lag on every feature ---------------------
-    rows.append(walk(X, y, years, dates, tick, "2. all features +1 day lag",
-                     extra_lag=True, tickers=tick))
+    rows.append(walk(X, y, years, dates, tick, "2. all features +1 day lag", extra_lag=True, tickers=tick))
 
     # --- test 3: drop close-to-close return features ------------------------
-    drop = [c for c in X.columns if c.startswith(("Return_r","Return_Lag"))]
-    rows.append(walk(X.drop(columns=drop), y, years, dates, tick,
-                     f"3. drop {len(drop)} close-return feats"))
+    drop = [c for c in X.columns if c.startswith(("Return_r", "Return_Lag"))]
+    rows.append(walk(X.drop(columns=drop), y, years, dates, tick, f"3. drop {len(drop)} close-return feats"))
 
     res = pd.DataFrame(rows)
     pd.set_option("display.width", 200, "display.float_format", lambda v: f"{v:,.4f}")
     print("\n=== is the overnight signal an artefact? ===")
-    print(res[["model","mean_IC","IC_t","gross_SR","turnover","SR@2bp"]].to_string(index=False))
+    print(res[["model", "mean_IC", "IC_t", "gross_SR", "turnover", "SR@2bp"]].to_string(index=False))
 
     # --- test 2: liquidity tertiles ----------------------------------------
     dv = df["Close"] * df["Volume"]
-    ter = dv.groupby(df["Date"]).transform(lambda s: pd.qcut(s.rank(method="first"), 3,
-                                                             labels=["low","mid","high"]))
+    ter = dv.groupby(df["Date"]).transform(lambda s: pd.qcut(s.rank(method="first"), 3, labels=["low", "mid", "high"]))
     pred = np.full(len(y), np.nan)
     Xv = X.values
     for yr in TEST:
@@ -101,8 +99,8 @@ def main():
         m = mask & (ter.values == t)
         r, *_ = evaluate(pred[m], y[m], dates[m], tick[m], f"tertile {t}")
         lr.append(r)
-    print(pd.DataFrame(lr)[["model","mean_IC","IC_t","gross_SR"]].to_string(index=False))
-    print(f"\ntotal {time.time()-t0:.0f}s")
+    print(pd.DataFrame(lr)[["model", "mean_IC", "IC_t", "gross_SR"]].to_string(index=False))
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

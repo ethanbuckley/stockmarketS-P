@@ -11,6 +11,7 @@ concentration.py - the overnight book lives or dies on its break-even cost
      flipping +w to -w trades 2|w| rather than |w|, so the book trades ~4.0
      gross/day instead of 2.0. Tested rather than assumed.
 """
+
 from __future__ import annotations
 
 import sys
@@ -65,8 +66,9 @@ def main():
 
     p_on = oos_pred(X, df["y_on"].values, years, dates)
     p_id = oos_pred(X, df["y_id"].values, years, dates)
-    d = pd.DataFrame({"d": dates[m], "pon": p_on[m], "pid": p_id[m],
-                      "ron": df["y_on"].values[m], "rid": df["y_id"].values[m]}).dropna()
+    d = pd.DataFrame(
+        {"d": dates[m], "pon": p_on[m], "pid": p_id[m], "ron": df["y_on"].values[m], "rid": df["y_id"].values[m]}
+    ).dropna()
 
     print("=== 1. weighting scheme, overnight-only book (gross traded = 2.0/day) ===")
     print(f"{'scheme':<20}{'gross bps/day':>15}{'gross SR':>10}{'break-even bps/side':>22}")
@@ -75,7 +77,7 @@ def main():
         w = weight(d["pon"].values, d["d"].values, scheme)
         pnl = pd.DataFrame({"d": d["d"].values, "x": w * d["ron"].values}).groupby("d")["x"].sum()
         be = pnl.mean() * 1e4 / 2.0
-        print(f"{scheme:<20}{pnl.mean()*1e4:>15.3f}{pnl.mean()/pnl.std(ddof=1)*ANN:>10.2f}{be:>22.2f}")
+        print(f"{scheme:<20}{pnl.mean() * 1e4:>15.3f}{pnl.mean() / pnl.std(ddof=1) * ANN:>10.2f}{be:>22.2f}")
         if best is None or be > best[1]:
             best = (scheme, be)
 
@@ -88,14 +90,20 @@ def main():
     # gross traded: overnight-only swaps 0<->w twice (2.0); the flip swaps
     # w_id <-> w_on twice, and those are near-independent books
     gross_flip = pd.Series(np.abs(w_on - w_id), index=d["d"].values).groupby(level=0).sum().mean() * 2
-    print(f"  overnight leg only : {pnl_on.mean()*1e4:6.3f} bps/day  gross traded 2.00/day"
-          f"  -> break-even {pnl_on.mean()*1e4/2.0:.2f} bps/side")
-    print(f"  flip (both legs)   : {both.mean()*1e4:6.3f} bps/day  gross traded {gross_flip:.2f}/day"
-          f"  -> break-even {both.mean()*1e4/gross_flip:.2f} bps/side")
+    print(
+        f"  overnight leg only : {pnl_on.mean() * 1e4:6.3f} bps/day  gross traded 2.00/day"
+        f"  -> break-even {pnl_on.mean() * 1e4 / 2.0:.2f} bps/side"
+    )
+    print(
+        f"  flip (both legs)   : {both.mean() * 1e4:6.3f} bps/day  gross traded {gross_flip:.2f}/day"
+        f"  -> break-even {both.mean() * 1e4 / gross_flip:.2f} bps/side"
+    )
     verdict = "BETTER" if both.mean() * 1e4 / gross_flip > pnl_on.mean() * 1e4 / 2 else "WORSE"
-    print(f"\n  the flip earns {both.mean()/pnl_on.mean()-1:+.0%} more gross but trades "
-          f"{gross_flip/2.0-1:+.0%} more, so it is {verdict} on break-even cost.")
-    print(f"\ntotal {time.time()-t0:.0f}s")
+    print(
+        f"\n  the flip earns {both.mean() / pnl_on.mean() - 1:+.0%} more gross but trades "
+        f"{gross_flip / 2.0 - 1:+.0%} more, so it is {verdict} on break-even cost."
+    )
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

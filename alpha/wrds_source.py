@@ -43,6 +43,7 @@ SCHEMA. Column and code assumptions are listed in ASSUMPTIONS below and are
 CHECKED at runtime by probe() before any large query runs, because they are
 written from documentation rather than from a live connection.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -59,8 +60,22 @@ PRICES_OUT = REPO / "alpha" / "ohlc_compustat.parquet"
 MEMB_OUT = REPO / "alpha" / "sp500_membership_compustat.parquet"
 
 ASSUMPTIONS = {
-    "comp.secd": ["gvkey", "iid", "datadate", "tic", "cusip", "prccd", "prcod",
-                  "prchd", "prcld", "cshtrd", "ajexdi", "trfd", "curcdd", "exchg"],
+    "comp.secd": [
+        "gvkey",
+        "iid",
+        "datadate",
+        "tic",
+        "cusip",
+        "prccd",
+        "prcod",
+        "prchd",
+        "prcld",
+        "cshtrd",
+        "ajexdi",
+        "trfd",
+        "curcdd",
+        "exchg",
+    ],
     "comp.idxcst_his": ["gvkey", "iid", "gvkeyx", "from", "thru"],
     "comp.security": ["gvkey", "iid", "tic", "tpci", "exchg"],
 }
@@ -83,16 +98,18 @@ def connect():
     import os
 
     import psycopg2
+
     user = os.environ.get("WRDS_USERNAME", "").strip()
     if not user:
         raise RuntimeError(
-            "set WRDS_USERNAME (and put the password in ~/.pgpass, chmod 600). "
-            "See this module's docstring.")
+            "set WRDS_USERNAME (and put the password in ~/.pgpass, chmod 600). See this module's docstring."
+        )
     # 30s was too short to even surface the real failure: it reported
     # "timeout expired" where the server actually accepts TLS in 0.2s, sends
     # an auth request, then holds and drops. 120s lets the true error through.
-    return psycopg2.connect(host=WRDS_HOST, port=WRDS_PORT, dbname=WRDS_DB,
-                            user=user, sslmode="require", connect_timeout=120)
+    return psycopg2.connect(
+        host=WRDS_HOST, port=WRDS_PORT, dbname=WRDS_DB, user=user, sslmode="require", connect_timeout=120
+    )
 
 
 def raw_sql(conn, query: str) -> pd.DataFrame:
@@ -114,25 +131,29 @@ def probe(db) -> pd.DataFrame:
         try:
             got = raw_sql(db, f"select * from {lib}.{name} limit 1")
             missing = [c for c in cols if c not in got.columns]
-            rows.append({"table": table, "access": "YES",
-                         "n_cols": len(got.columns),
-                         "missing_expected_cols": ", ".join(missing) or "none"})
+            rows.append(
+                {
+                    "table": table,
+                    "access": "YES",
+                    "n_cols": len(got.columns),
+                    "missing_expected_cols": ", ".join(missing) or "none",
+                }
+            )
         except Exception as e:
-            db.rollback()          # a failed query poisons the transaction
+            db.rollback()  # a failed query poisons the transaction
             msg = str(e).split("\n")[0][:90]
-            rows.append({"table": table, "access": "NO", "n_cols": 0,
-                         "missing_expected_cols": msg})
+            rows.append({"table": table, "access": "NO", "n_cols": 0, "missing_expected_cols": msg})
     # CRSP is the thing we actually want; test it too
     for table in ("crsp.dsf", "crsp.dsp500list"):
         lib, name = table.split(".")
         try:
             raw_sql(db, f"select * from {lib}.{name} limit 1")
-            rows.append({"table": table, "access": "YES", "n_cols": -1,
-                         "missing_expected_cols": "-"})
+            rows.append({"table": table, "access": "YES", "n_cols": -1, "missing_expected_cols": "-"})
         except Exception as e:
             db.rollback()
-            rows.append({"table": table, "access": "NO", "n_cols": 0,
-                         "missing_expected_cols": str(e).split("\n")[0][:90]})
+            rows.append(
+                {"table": table, "access": "NO", "n_cols": 0, "missing_expected_cols": str(e).split("\n")[0][:90]}
+            )
     return pd.DataFrame(rows)
 
 
@@ -151,8 +172,7 @@ def sp500_gvkeyx(db) -> str:
     """Find the S&P 500 index id by NAME rather than hardcoding it."""
     idx = raw_sql(db, "select gvkeyx, conm from comp.idx_index")
     hit = idx[idx["conm"].str.upper().str.contains("S&P 500", na=False)]
-    exact = hit[hit["conm"].str.upper().str.strip().isin(
-        ["S&P 500 COMP-LTD", "S&P 500 COMPOSITE", "S&P 500"])]
+    exact = hit[hit["conm"].str.upper().str.strip().isin(["S&P 500 COMP-LTD", "S&P 500 COMPOSITE", "S&P 500"])]
     chosen = (exact if len(exact) else hit).iloc[0]
     print(f"  index: gvkeyx={chosen['gvkeyx']}  {chosen['conm']}")
     return chosen["gvkeyx"]
@@ -183,9 +203,7 @@ def to_panel(raw: pd.DataFrame) -> pd.DataFrame:
     df["Low"] = df["prcld"] * f
     df["Volume"] = df["cshtrd"]
 
-    df = (df.sort_values(["Ticker", "Date"])
-            .drop_duplicates(["Ticker", "Date"], keep="last")
-            .reset_index(drop=True))
+    df = df.sort_values(["Ticker", "Date"]).drop_duplicates(["Ticker", "Date"], keep="last").reset_index(drop=True)
     g = df.groupby("Ticker", observed=True)
     prev_close = g["Close"].shift(1)
 
@@ -201,8 +219,20 @@ def to_panel(raw: pd.DataFrame) -> pd.DataFrame:
 
     chk = ((1 + df["r_overnight"]) * (1 + df["r_intraday"]) - 1 - df["r_cc"]).abs()
     df.attrs["max_decomposition_error"] = float(chk.max()) if chk.notna().any() else 0.0
-    keep = ["Date", "Ticker", "Open", "High", "Low", "Close", "Volume",
-            "r_cc", "r_intraday", "r_overnight", "gvkey", "iid"]
+    keep = [
+        "Date",
+        "Ticker",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "r_cc",
+        "r_intraday",
+        "r_overnight",
+        "gvkey",
+        "iid",
+    ]
     return df[[c for c in keep if c in df.columns]]
 
 
@@ -276,8 +306,11 @@ def pull_prices_crsp(db, start="2014-12-01", end=None) -> pd.DataFrame:
     """
     print("  querying crsp.dsf ...", flush=True)
     raw = raw_sql(db, q)
-    dl = raw_sql(db, f"""select permno, dlstdt, dlret from crsp.dsedelist
-                         where permno in ({permnos}) and dlret is not null""")
+    dl = raw_sql(
+        db,
+        f"""select permno, dlstdt, dlret from crsp.dsedelist
+                         where permno in ({permnos}) and dlret is not null""",
+    )
     return to_panel_crsp(raw, dl)
 
 
@@ -304,10 +337,9 @@ def to_panel_crsp(raw: pd.DataFrame, delist: pd.DataFrame) -> pd.DataFrame:
         df.loc[hit, "ret"] = (1 + df.loc[hit, "ret"]) * (1 + df.loc[hit, "dlret"]) - 1
         print(f"  delisting returns applied to {int(hit.sum())} observations")
 
-    df["Ticker"] = df["permno"].astype(int).astype(str)     # identity is permno
+    df["Ticker"] = df["permno"].astype(int).astype(str)  # identity is permno
     df["ticker_label"] = df["ticker"]
-    df = (df.sort_values(["Ticker", "Date"])
-            .drop_duplicates(["Ticker", "Date"], keep="last").reset_index(drop=True))
+    df = df.sort_values(["Ticker", "Date"]).drop_duplicates(["Ticker", "Date"], keep="last").reset_index(drop=True)
 
     # LPS's own decomposition
     df["r_cc"] = df["ret"]
@@ -330,8 +362,20 @@ def to_panel_crsp(raw: pd.DataFrame, delist: pd.DataFrame) -> pd.DataFrame:
     chk = ((1 + df["r_overnight"]) * (1 + df["r_intraday"]) - 1 - df["r_cc"]).abs()
     df.attrs["max_decomposition_error"] = float(chk.max()) if chk.notna().any() else 0.0
     df.attrs["no_trade_share"] = float(df["no_trade"].mean())
-    keep = ["Date", "Ticker", "ticker_label", "Open", "High", "Low", "Close",
-            "Volume", "r_cc", "r_intraday", "r_overnight", "permno"]
+    keep = [
+        "Date",
+        "Ticker",
+        "ticker_label",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "r_cc",
+        "r_intraday",
+        "r_overnight",
+        "permno",
+    ]
     return df[keep]
 
 
@@ -404,16 +448,16 @@ if __name__ == "__main__":
                 print("CRSP not entitled -> falling back to comp.secd")
                 p = pull_prices(db, a.start)
             p.to_parquet(PRICES_OUT, index=False)
-            print(f"prices: rows={len(p):,} tickers={p.Ticker.nunique():,} "
-                  f"decomposition error={p.attrs['max_decomposition_error']:.1e}")
+            print(
+                f"prices: rows={len(p):,} tickers={p.Ticker.nunique():,} "
+                f"decomposition error={p.attrs['max_decomposition_error']:.1e}"
+            )
             print(f"wrote {PRICES_OUT}")
         if a.cmd in ("constituents", "all"):
-            m = (pull_constituents_crsp(db) if has_crsp(db)
-                 else pull_constituents(db, sp500_gvkeyx(db)))
+            m = pull_constituents_crsp(db) if has_crsp(db) else pull_constituents(db, sp500_gvkeyx(db))
             m.to_parquet(MEMB_OUT, index=False)
             n = m.groupby("asof")["Ticker"].size()
-            print(f"membership: snapshots={n.size} members {n.min()}-{n.max()} "
-                  f"distinct ever={m.Ticker.nunique()}")
+            print(f"membership: snapshots={n.size} members {n.min()}-{n.max()} distinct ever={m.Ticker.nunique()}")
             print(f"wrote {MEMB_OUT}")
     finally:
         db.close()

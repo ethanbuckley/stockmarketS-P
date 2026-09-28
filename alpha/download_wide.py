@@ -6,6 +6,7 @@ currently-listed names only. Small-cap delisting rates are several times those
 of large caps, so this file is MORE survivorship-biased than the S&P 500 panel,
 not less. Treat anything computed from it as suggestive.
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,7 +29,9 @@ if __name__ == "__main__":
     t0 = time.time()
     raw = download(tk, chunk=40, pause=0.8)
     out = decompose(raw)
-    print(f"rows={len(out):,} tickers={out.Ticker.nunique()} "
-          f"max decomposition error={out.attrs['max_decomposition_error']:.1e}")
+    print(
+        f"rows={len(out):,} tickers={out.Ticker.nunique()} "
+        f"max decomposition error={out.attrs['max_decomposition_error']:.1e}"
+    )
     out.to_parquet(OUT, index=False)
-    print(f"wrote {OUT} ({time.time()-t0:.0f}s)")
+    print(f"wrote {OUT} ({time.time() - t0:.0f}s)")

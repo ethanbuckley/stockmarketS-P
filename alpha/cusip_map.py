@@ -14,6 +14,7 @@ or stale name loses to the real one. The mapping is checked against six CUSIPs
 that are publicly documented, and any ticker whose winning candidate holds less
 than 80% of that ticker's matched dollars is dropped as ambiguous.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,11 +33,12 @@ TICKER_JSON = "https://www.sec.gov/files/company_tickers.json"
 MAP_PATH = REPO / "alpha" / "cusip_map.csv"
 
 # publicly documented issuer prefixes, used as a correctness check
-KNOWN = {"AAPL": "037833", "MSFT": "594918", "ABT": "002824",
-         "JNJ": "478160", "XOM": "30231G", "JPM": "46625H"}
+KNOWN = {"AAPL": "037833", "MSFT": "594918", "ABT": "002824", "JNJ": "478160", "XOM": "30231G", "JPM": "46625H"}
 
-SUFFIXES = r"\b(INC|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|PLC|LP|LLC|HLDGS?|HOLDINGS?|" \
-           r"GROUP|GRP|THE|CLASS|CL|COM|NEW|SA|NV|AG|TRUST|REIT|INTL|INTERNATIONAL)\b"
+SUFFIXES = (
+    r"\b(INC|CORP|CORPORATION|CO|COMPANY|LTD|LIMITED|PLC|LP|LLC|HLDGS?|HOLDINGS?|"
+    r"GROUP|GRP|THE|CLASS|CL|COM|NEW|SA|NV|AG|TRUST|REIT|INTL|INTERNATIONAL)\b"
+)
 
 
 def norm(s: str) -> str:
@@ -64,8 +66,7 @@ def build(tickers: list[str] | None = None, min_breadth: int = 0) -> pd.DataFram
         b = own.groupby("cusip6")["holders"].max()
         own = own[own["cusip6"].isin(b[b >= min_breadth].index)]
     # one row per (cusip6, issuer name) with its total institutional dollars
-    cand = (own.groupby(["cusip6", "issuer"], observed=True)["inst_dollars"]
-               .sum().reset_index())
+    cand = own.groupby(["cusip6", "issuer"], observed=True)["inst_dollars"].sum().reset_index()
     cand["key"] = cand["issuer"].map(norm)
 
     titles = sec_titles()
@@ -79,26 +80,28 @@ def build(tickers: list[str] | None = None, min_breadth: int = 0) -> pd.DataFram
     # ("APPLE INC", "Apple, Inc.", "APPLE INC COM"), all against one CUSIP6.
     # Scoring variants separately splits the real issuer's dollars and can push
     # a correct match below the ambiguity threshold.
-    m = (m.groupby(["ticker", "title", "cusip6"], observed=True)
-           .agg(inst_dollars=("inst_dollars", "sum"),
-                issuer=("issuer", "first"))
-           .reset_index())
+    m = (
+        m.groupby(["ticker", "title", "cusip6"], observed=True)
+        .agg(inst_dollars=("inst_dollars", "sum"), issuer=("issuer", "first"))
+        .reset_index()
+    )
     tot = m.groupby("ticker")["inst_dollars"].transform("sum")
     m["share"] = m["inst_dollars"] / tot
     best = m.sort_values("inst_dollars", ascending=False).drop_duplicates("ticker")
-    best = best[best["share"] >= 0.80]          # drop ambiguous name collisions
+    best = best[best["share"] >= 0.80]  # drop ambiguous name collisions
     return best[["ticker", "cusip6", "issuer", "title", "inst_dollars", "share"]]
 
 
 if __name__ == "__main__":
     import pickle
+
     with open(REPO / "master_cache.pkl", "rb") as f:
         _, meta = pickle.load(f)
     tk = sorted(meta["tickers"])
     mp = build(tk)
     mp.to_csv(MAP_PATH, index=False)
 
-    print(f"mapped {len(mp)}/{len(tk)} tickers ({len(mp)/len(tk):.0%})")
+    print(f"mapped {len(mp)}/{len(tk)} tickers ({len(mp) / len(tk):.0%})")
     print("\ncheck against publicly documented CUSIP6:")
     ok = 0
     for t, c6 in KNOWN.items():

@@ -19,6 +19,7 @@ Two tests:
      lows, and compare it to the break-even cost the strategy can pay. If the
      spread exceeds the break-even, the alpha is not reachable.
 """
+
 from __future__ import annotations
 
 import sys
@@ -80,7 +81,8 @@ def main():
     p = oos_pred(X, y, years, dates)
     m = np.isin(years, TEST)
     tb = df.groupby("Date", observed=True)["breadth"].transform(
-        lambda s: pd.qcut(s.rank(method="first"), 3, labels=["low", "mid", "high"]))
+        lambda s: pd.qcut(s.rank(method="first"), 3, labels=["low", "mid", "high"])
+    )
 
     # ---- A) extra day of lag -------------------------------------------
     Xl = pd.DataFrame(X, columns=FEATS)
@@ -103,13 +105,11 @@ def main():
         r0, *_ = evaluate(p[sel], y[sel], dates[sel], tick[sel], "b")
         s2 = sel & ok
         r1, *_ = evaluate(plag[s2], y[s2], dates[s2], tick[s2], "l")
-        print(f"{t:<18}{r0['mean_IC']:>10.4f}{r1['mean_IC']:>13.4f}"
-              f"{r1['mean_IC']/r0['mean_IC']:>10.0%}")
+        print(f"{t:<18}{r0['mean_IC']:>10.4f}{r1['mean_IC']:>13.4f}{r1['mean_IC'] / r0['mean_IC']:>10.0%}")
 
     # ---- B) spread vs break-even ---------------------------------------
     print("\n=== B) can the strategy pay the spread it must cross? ===")
-    print(f"{'breadth bucket':<18}{'gross bps/day':>15}{'break-even/side':>17}"
-          f"{'est. spread/side':>18}{'verdict':>12}")
+    print(f"{'breadth bucket':<18}{'gross bps/day':>15}{'break-even/side':>17}{'est. spread/side':>18}{'verdict':>12}")
     for t in ("low", "mid", "high"):
         sel = m & (tb.values == t)
         pnl = decile_book(p[sel], y[sel], dates[sel])
@@ -120,9 +120,10 @@ def main():
         traded = (rk >= 0.9) | (rk <= 0.1)
         half = df.loc[sel, "spread"].values[traded.values] * 1e4 / 2.0
         med = np.nanmedian(half)
-        print(f"{t:<18}{pnl.mean()*1e4:>15.3f}{be:>17.2f}{med:>18.1f}"
-              f"{('TRADEABLE' if be > med else 'not viable'):>12}")
-    print(f"\ntotal {time.time()-t0:.0f}s")
+        print(
+            f"{t:<18}{pnl.mean() * 1e4:>15.3f}{be:>17.2f}{med:>18.1f}{('TRADEABLE' if be > med else 'not viable'):>12}"
+        )
+    print(f"\ntotal {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ request 403s. Set it yourself:
 
     export SEC_USER_AGENT="Your Name your.email@domain.com"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -47,9 +48,12 @@ PLACEHOLDER = "AlphaResearch research@example.com"
 def user_agent() -> str:
     ua = os.environ.get("SEC_USER_AGENT", "").strip()
     if not ua:
-        print("  ! SEC_USER_AGENT is unset; using a placeholder contact.\n"
-              "    SEC asks you to declare traffic with a real address:\n"
-              '      export SEC_USER_AGENT="Your Name you@domain.com"', file=sys.stderr)
+        print(
+            "  ! SEC_USER_AGENT is unset; using a placeholder contact.\n"
+            "    SEC asks you to declare traffic with a real address:\n"
+            '      export SEC_USER_AGENT="Your Name you@domain.com"',
+            file=sys.stderr,
+        )
         return PLACEHOLDER
     return ua
 
@@ -69,7 +73,6 @@ def list_files(s: requests.Session, since_year: int = 2014) -> list[str]:
         if yrs and max(int(y) for y in yrs) >= since_year:
             keep.append(u)
     return keep
-
 
 
 def _member(z: zipfile.ZipFile, name: str) -> str | None:
@@ -92,20 +95,36 @@ def aggregate_zip(blob: bytes) -> pd.DataFrame | None:
     if not (m_sub and m_info):
         return None
 
-    sub = pd.read_csv(z.open(m_sub), sep="\t",
-                      usecols=["ACCESSION_NUMBER", "CIK", "PERIODOFREPORT", "SUBMISSIONTYPE"],
-                      dtype={"ACCESSION_NUMBER": str, "CIK": str})
+    sub = pd.read_csv(
+        z.open(m_sub),
+        sep="\t",
+        usecols=["ACCESSION_NUMBER", "CIK", "PERIODOFREPORT", "SUBMISSIONTYPE"],
+        dtype={"ACCESSION_NUMBER": str, "CIK": str},
+    )
     sub = sub[sub["SUBMISSIONTYPE"].astype(str).str.startswith("13F-HR")]
     sub["period"] = pd.to_datetime(sub["PERIODOFREPORT"], format="%d-%b-%Y", errors="coerce")
     sub = sub.dropna(subset=["period"])[["ACCESSION_NUMBER", "CIK", "period"]]
 
-    info = pd.read_csv(z.open(m_info), sep="\t",
-                       usecols=["ACCESSION_NUMBER", "NAMEOFISSUER", "TITLEOFCLASS", "CUSIP",
-                                "VALUE", "SSHPRNAMT", "SSHPRNAMTTYPE", "PUTCALL"],
-                       dtype={"ACCESSION_NUMBER": str, "CUSIP": str, "PUTCALL": str},
-                       low_memory=False)
-    info = info[(info["SSHPRNAMTTYPE"].astype(str).str.upper() == "SH")
-                & (info["PUTCALL"].isna() | (info["PUTCALL"].astype(str).str.strip() == ""))]
+    info = pd.read_csv(
+        z.open(m_info),
+        sep="\t",
+        usecols=[
+            "ACCESSION_NUMBER",
+            "NAMEOFISSUER",
+            "TITLEOFCLASS",
+            "CUSIP",
+            "VALUE",
+            "SSHPRNAMT",
+            "SSHPRNAMTTYPE",
+            "PUTCALL",
+        ],
+        dtype={"ACCESSION_NUMBER": str, "CUSIP": str, "PUTCALL": str},
+        low_memory=False,
+    )
+    info = info[
+        (info["SSHPRNAMTTYPE"].astype(str).str.upper() == "SH")
+        & (info["PUTCALL"].isna() | (info["PUTCALL"].astype(str).str.strip() == ""))
+    ]
     info = info[info["SSHPRNAMT"] > 0]
     if info.empty:
         return None
@@ -120,13 +139,17 @@ def aggregate_zip(blob: bytes) -> pd.DataFrame | None:
         return None
     df["CUSIP"] = df["CUSIP"].str.strip().str.upper().str.zfill(9)
 
-    out = (df.groupby(["period", "CUSIP"], observed=True)
-             .agg(holders=("CIK", "nunique"),
-                  inst_shares=("SSHPRNAMT", "sum"),
-                  inst_dollars=("dollars", "sum"),
-                  issuer=("NAMEOFISSUER", "first"),
-                  cls=("TITLEOFCLASS", "first"))
-             .reset_index())
+    out = (
+        df.groupby(["period", "CUSIP"], observed=True)
+        .agg(
+            holders=("CIK", "nunique"),
+            inst_shares=("SSHPRNAMT", "sum"),
+            inst_dollars=("dollars", "sum"),
+            issuer=("NAMEOFISSUER", "first"),
+            cls=("TITLEOFCLASS", "first"),
+        )
+        .reset_index()
+    )
     out["implied_scale"] = scale
     return out
 
@@ -151,8 +174,11 @@ def ingest(since_year: int = 2014, pause: float = 1.0) -> None:
                 print(f"  [{i}/{len(files)}] {tag} EMPTY", flush=True)
                 continue
             agg.to_parquet(dest, index=False)
-            print(f"  [{i}/{len(files)}] {tag}  {len(agg):>7,} cusip-rows  "
-                  f"scale={agg.implied_scale.iloc[0]:g}  {time.time()-t0:.0f}s", flush=True)
+            print(
+                f"  [{i}/{len(files)}] {tag}  {len(agg):>7,} cusip-rows  "
+                f"scale={agg.implied_scale.iloc[0]:g}  {time.time() - t0:.0f}s",
+                flush=True,
+            )
         except Exception as e:
             print(f"  [{i}/{len(files)}] {tag} FAILED {type(e).__name__}: {e}", flush=True)
         time.sleep(pause)
@@ -164,12 +190,13 @@ def load() -> pd.DataFrame:
         raise FileNotFoundError(f"no 13F cache in {CACHE}; run `python3 alpha/thirteenf.py ingest`")
     df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
     # a period can appear in overlapping filing windows; keep the fullest record
-    df = (df.sort_values("holders", ascending=False)
-            .drop_duplicates(["period", "CUSIP"], keep="first")
-            .sort_values(["CUSIP", "period"])
-            .reset_index(drop=True))
+    df = (
+        df.sort_values("holders", ascending=False)
+        .drop_duplicates(["period", "CUSIP"], keep="first")
+        .sort_values(["CUSIP", "period"])
+        .reset_index(drop=True)
+    )
     return df
-
 
 
 # ---------------------------------------------------------------------------
@@ -201,23 +228,29 @@ def holdings_from_zip(blob: bytes, keep: set[str]) -> pd.DataFrame | None:
     if not (m_sub and m_info):
         return None
 
-    sub = pd.read_csv(z.open(m_sub), sep="\t",
-                      usecols=["ACCESSION_NUMBER", "CIK", "PERIODOFREPORT",
-                               "FILING_DATE", "SUBMISSIONTYPE"],
-                      dtype={"ACCESSION_NUMBER": str, "CIK": str})
+    sub = pd.read_csv(
+        z.open(m_sub),
+        sep="\t",
+        usecols=["ACCESSION_NUMBER", "CIK", "PERIODOFREPORT", "FILING_DATE", "SUBMISSIONTYPE"],
+        dtype={"ACCESSION_NUMBER": str, "CIK": str},
+    )
     sub = sub[sub["SUBMISSIONTYPE"].astype(str).str.startswith("13F-HR")]
     sub["period"] = pd.to_datetime(sub["PERIODOFREPORT"], format="%d-%b-%Y", errors="coerce")
     sub["filed"] = pd.to_datetime(sub["FILING_DATE"], format="%d-%b-%Y", errors="coerce")
     sub = sub.dropna(subset=["period", "filed"])[["ACCESSION_NUMBER", "CIK", "period", "filed"]]
 
-    info = pd.read_csv(z.open(m_info), sep="\t",
-                       usecols=["ACCESSION_NUMBER", "CUSIP", "VALUE", "SSHPRNAMT",
-                                "SSHPRNAMTTYPE", "PUTCALL"],
-                       dtype={"ACCESSION_NUMBER": str, "CUSIP": str, "PUTCALL": str},
-                       low_memory=False)
-    info = info[(info["SSHPRNAMTTYPE"].astype(str).str.upper() == "SH")
-                & (info["PUTCALL"].isna() | (info["PUTCALL"].astype(str).str.strip() == ""))
-                & (info["SSHPRNAMT"] > 0)]
+    info = pd.read_csv(
+        z.open(m_info),
+        sep="\t",
+        usecols=["ACCESSION_NUMBER", "CUSIP", "VALUE", "SSHPRNAMT", "SSHPRNAMTTYPE", "PUTCALL"],
+        dtype={"ACCESSION_NUMBER": str, "CUSIP": str, "PUTCALL": str},
+        low_memory=False,
+    )
+    info = info[
+        (info["SSHPRNAMTTYPE"].astype(str).str.upper() == "SH")
+        & (info["PUTCALL"].isna() | (info["PUTCALL"].astype(str).str.strip() == ""))
+        & (info["SSHPRNAMT"] > 0)
+    ]
     if info.empty:
         return None
     scale = 1000.0 if (info["VALUE"] / info["SSHPRNAMT"]).median() < 1.0 else 1.0
@@ -231,9 +264,11 @@ def holdings_from_zip(blob: bytes, keep: set[str]) -> pd.DataFrame | None:
     if df.empty:
         return None
     # one filing can list an issuer on several rows (share classes, co-managers)
-    return (df.groupby(["period", "cusip6", "CIK", "filed"], observed=True)
-              .agg(shares=("SSHPRNAMT", "sum"), dollars=("dollars", "sum"))
-              .reset_index())
+    return (
+        df.groupby(["period", "cusip6", "CIK", "filed"], observed=True)
+        .agg(shares=("SSHPRNAMT", "sum"), dollars=("dollars", "sum"))
+        .reset_index()
+    )
 
 
 def ingest_holdings(since_year: int = 2014, pause: float = 1.0, wide: bool = False) -> None:
@@ -258,8 +293,7 @@ def ingest_holdings(since_year: int = 2014, pause: float = 1.0, wide: bool = Fal
                 print(f"  [{i}/{len(files)}] {tag} EMPTY", flush=True)
                 continue
             h.to_parquet(dest, index=False)
-            print(f"  [{i}/{len(files)}] {tag}  {len(h):>7,} manager-rows  "
-                  f"{time.time()-t0:.0f}s", flush=True)
+            print(f"  [{i}/{len(files)}] {tag}  {len(h):>7,} manager-rows  {time.time() - t0:.0f}s", flush=True)
         except Exception as e:
             print(f"  [{i}/{len(files)}] {tag} FAILED {type(e).__name__}: {e}", flush=True)
         time.sleep(pause)
@@ -273,14 +307,17 @@ def load_holdings(wide: bool = False) -> pd.DataFrame:
     if not parts:
         raise FileNotFoundError(f"no holdings in {src}; run `thirteenf.py holdings`")
     df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
-    df = (df.sort_values("filed")
-            .drop_duplicates(["period", "cusip6", "CIK"], keep="last"))
-    return (df.groupby(["period", "cusip6"], observed=True)
-              .agg(breadth=("CIK", "nunique"),
-                   inst_shares=("shares", "sum"),
-                   inst_dollars=("dollars", "sum"),
-                   last_filed=("filed", "max"))
-              .reset_index())
+    df = df.sort_values("filed").drop_duplicates(["period", "cusip6", "CIK"], keep="last")
+    return (
+        df.groupby(["period", "cusip6"], observed=True)
+        .agg(
+            breadth=("CIK", "nunique"),
+            inst_shares=("shares", "sum"),
+            inst_dollars=("dollars", "sum"),
+            last_filed=("filed", "max"),
+        )
+        .reset_index()
+    )
 
 
 if __name__ == "__main__":
@@ -295,7 +332,8 @@ if __name__ == "__main__":
         ingest_holdings(a.since, wide=a.wide)
     else:
         d = load()
-        print(f"rows={len(d):,}  cusips={d.CUSIP.nunique():,}  "
-              f"periods={d.period.nunique()}  {d.period.min().date()} -> {d.period.max().date()}")
-        print(d.groupby("period").agg(cusips=("CUSIP", "size"),
-                                      holders=("holders", "median")).tail(8).to_string())
+        print(
+            f"rows={len(d):,}  cusips={d.CUSIP.nunique():,}  "
+            f"periods={d.period.nunique()}  {d.period.min().date()} -> {d.period.max().date()}"
+        )
+        print(d.groupby("period").agg(cusips=("CUSIP", "size"), holders=("holders", "median")).tail(8).to_string())

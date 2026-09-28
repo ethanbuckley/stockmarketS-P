@@ -9,6 +9,7 @@ than an edit in five places.
     ALPHA_SOURCE=compustat  require Compustat; fail loudly if absent
     ALPHA_SOURCE=yfinance   force the original layer (for A/B comparison)
 """
+
 from __future__ import annotations
 
 import os
@@ -34,8 +35,7 @@ def mode() -> str:
 def price_files() -> list[Path]:
     if mode() == "compustat":
         if not COMPUSTAT_PRICES.exists():
-            raise FileNotFoundError(
-                f"{COMPUSTAT_PRICES} missing; run `python3 alpha/wrds_source.py prices`")
+            raise FileNotFoundError(f"{COMPUSTAT_PRICES} missing; run `python3 alpha/wrds_source.py prices`")
         return [COMPUSTAT_PRICES]
     return [p for p in YF_PRICES if p.exists()]
 
@@ -47,5 +47,4 @@ def membership_file() -> Path:
 
 
 def describe() -> str:
-    return (f"source={mode()}  prices={[p.name for p in price_files()]}  "
-            f"membership={membership_file().name}")
+    return f"source={mode()}  prices={[p.name for p in price_files()]}  membership={membership_file().name}"
