@@ -15,6 +15,8 @@ Outputs three small committed artefacts consumed by the dashboard and README:
                                        accompany any quoted number
     data/validation_daily.csv          one row per test day
     data/validation_calibration.csv    reliability-curve bins per fold + pooled
+    data/backtest_daily.csv            daily returns of the long-only backtest
+                                       and its benchmarks
 
 Runs offline like generate_signals.py (needs the full pipeline deps plus
 scikit-learn); nothing here executes in the deployed app.
@@ -42,66 +44,130 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from screener import (
+from config import (
+    BACKTEST_COST_BPS,
+    BACKTEST_HOLD_DAYS,
     BOTTOM_N_CANDIDATES,
+    DATA_DIR,
     DATA_START_DATE,
+    EARLY_STOPPING_ROUNDS,
+    EARLY_STOPPING_VALIDATION_FRACTION,
     FEATURE_COLUMNS,
     FORWARD_WINDOW_DAYS,
     STOP_LOSS_PCT,
     TAKE_PROFIT_PCT,
     TOP_N_CANDIDATES,
+    TRADING_DAYS_PER_YEAR,
+    VALIDATION_CALIBRATION_PATH,
+    VALIDATION_DAILY_PATH,
+    VALIDATION_METRICS_PATH,
     XGB_PARAMS,
-    build_master_dataframe,
-    build_technical_features,
-    train_model,
+)
+from screener import build_master_dataframe, build_technical_features, train_model
+
+BACKTEST_PATH = os.path.join(DATA_DIR, "backtest_daily.csv")
+
+# Subset of the daily aggregates reported for model-free baselines
+BASELINE_KEYS = (
+    "daily_auc_mean",
+    "daily_auc_ci95",
+    "precision_top15_mean",
+    "excess_precision_top15_mean",
+    "excess_precision_top15_ci95",
+    "frac_days_top15_beats_base",
+    "top_decile_lift_mean",
 )
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-METRICS_PATH = os.path.join(DATA_DIR, "validation_metrics.json")
-DAILY_PATH = os.path.join(DATA_DIR, "validation_daily.csv")
-CALIBRATION_PATH = os.path.join(DATA_DIR, "validation_calibration.csv")
+METRICS_PATH = VALIDATION_METRICS_PATH
+DAILY_PATH = VALIDATION_DAILY_PATH
+CALIBRATION_PATH = VALIDATION_CALIBRATION_PATH
 
-SCHEMA_VERSION = 1
+# Bumped when the artefact layout or the meaning of a recorded number
+# changes. 3: point-in-time universe (former members included up to their
+# removal date where prices exist), per-day cross-sectional AUC, portfolio
+# backtest block and data/backtest_daily.csv.
+SCHEMA_VERSION = 3
+
+
+def _roc_auc(y, p) -> float:
+    """ROC AUC via scikit-learn, imported lazily so importing this module
+    (tests, the dashboard's docs) does not require sklearn."""
+    from sklearn.metrics import roc_auc_score
+
+    return float(roc_auc_score(y, p))
+
+
+def rank_auc(y, p) -> float:
+    """ROC AUC by the rank (Mann-Whitney) formula; NaN if one class is absent.
+    Pure pandas/numpy so the per-day metrics need no sklearn."""
+    y = np.asarray(y, dtype=float)
+    n_pos = y.sum()
+    n_neg = len(y) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    ranks = pd.Series(np.asarray(p, dtype=float)).rank(method="average").to_numpy()
+    return float((ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
 
 # Features computed by build_technical_features from a single ticker's OHLCV.
 # The remaining FEATURE_COLUMNS are macro pct_changes/shifts, causal by
 # construction; rolling/ewm windows checked here are the only nontrivial
 # windowing in the pipeline.
 TECHNICAL_FEATURES = [
-    "RSI", "MACD", "BB_Position", "Price_to_VWAP",
-    "ATR_Ratio", "Return", "Volume_Surge", "Day_Of_Week",
+    "RSI",
+    "MACD",
+    "BB_Position",
+    "Price_to_VWAP",
+    "ATR_Ratio",
+    "Return",
+    "Volume_Surge",
+    "Day_Of_Week",
 ]
+
 
 # Wording is shipped inside the same artefact as the numbers, so the app and
 # README cannot quote a metric without its caveats travelling with it.
-CAVEATS = [
-    "Survivorship bias: the universe is today's S&P 500 constituents applied "
-    "retroactively to the full 2015+ history. Stocks removed from the index "
-    "along the way are absent, which biases measured hit rates upward. "
-    "Historical constituent lists are not freely available, so this is "
-    "documented rather than corrected.",
-    "Prices are a single yfinance snapshot with auto-adjustment applied at "
-    "download time; adjusted history can differ slightly from what was "
-    "observable in real time.",
-    "Consecutive test days share overlapping 5-day label windows and are not "
-    "independent; confidence intervals use a moving-block bootstrap with "
-    "block length 5.",
-    "A low predicted probability is not a symmetric short signal: label 0 "
-    "mixes 'stop-loss hit first' with 'no barrier hit within the window'.",
-    "These are classifier-quality metrics only. No portfolio construction, "
-    "transaction costs, slippage or capacity effects are modelled; nothing "
-    "here is a tradeable return.",
-]
+def caveats(metadata: dict) -> list[str]:
+    """Wording shipped inside the same artefact as the numbers, so the app and
+    README cannot quote a metric without its caveats travelling with it."""
+    u = metadata.get("universe", {})
+    n_removed = u.get("n_removed_since_start", 0)
+    n_recovered = u.get("n_removed_with_price_data", 0)
+    return [
+        "Survivorship bias: the universe is point-in-time by symbol. Current "
+        "members enter from their S&P 500 join date (Wikipedia constituents "
+        "table) and companies removed since 2015 are included up to their "
+        f"removal date where Yahoo still has prices ({n_recovered} of {n_removed} "
+        "removed tickers). The remaining removed companies, mostly acquired "
+        "or delisted, are absent, which still biases measured hit rates upward.",
+        "Prices are a single yfinance snapshot with auto-adjustment applied at "
+        "download time; adjusted history can differ slightly from what was "
+        "observable in real time.",
+        "Consecutive test days share overlapping 5-day label windows and are not "
+        "independent; confidence intervals use a moving-block bootstrap with "
+        "block length 5.",
+        "A low predicted probability is not a symmetric short signal: label 0 "
+        "mixes 'stop-loss hit first' with 'no barrier hit within the window'.",
+        "Pooled ROC AUC mixes two things: knowing which days have high hit "
+        "rates (macro features) and ranking stocks within a day. Only the "
+        "within-day part is usable by a screener; see the mean per-day AUC.",
+        "The backtest is a stylised long-only book: each day's top picks, "
+        f"equal-weighted, held {BACKTEST_HOLD_DAYS} trading days close-to-close "
+        f"as overlapping tranches, charged {BACKTEST_COST_BPS:.0f} bps per side. "
+        "No barrier exits, no slippage model, no capacity or borrow "
+        "constraints, and the same survivorship bias as above.",
+    ]
 
 
 # =============================================================================
 # FOLDS AND LEAKAGE CONTROL
 # =============================================================================
 
+
 @dataclass(frozen=True)
 class Fold:
     fold_id: int
-    train_end: pd.Timestamp   # last usable training date, after the purge
+    train_end: pd.Timestamp  # last usable training date, after the purge
     test_start: pd.Timestamp
     test_end: pd.Timestamp
     partial: bool
@@ -134,10 +200,7 @@ def make_folds(
         test_start, test_end = test_dates[0], test_dates[-1]
         pos = int(cal.searchsorted(test_start))
         if pos - purge_days - 1 < 0:
-            raise ValueError(
-                f"Not enough history before {year} to train after a "
-                f"{purge_days}-day purge."
-            )
+            raise ValueError(f"Not enough history before {year} to train after a {purge_days}-day purge.")
         fold_id += 1
         folds.append(
             Fold(
@@ -153,9 +216,7 @@ def make_folds(
     return folds
 
 
-def split_fold(
-    valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_fold(valid_df: pd.DataFrame, cal: pd.DatetimeIndex, fold: Fold) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Splits the filtered (complete features + valid label) frame into the
     fold's train and test sets, and asserts the purge gap held.
@@ -171,20 +232,15 @@ def split_fold(
     train_max_pos = int(cal.searchsorted(train.index.max()))
     test_min_pos = int(cal.searchsorted(test.index.min()))
     assert train_max_pos + FORWARD_WINDOW_DAYS < test_min_pos, (
-        f"Fold {fold.fold_id}: purge violated "
-        f"(train ends at position {train_max_pos}, test starts at {test_min_pos})."
+        f"Fold {fold.fold_id}: purge violated (train ends at position {train_max_pos}, test starts at {test_min_pos})."
     )
     return train, test
 
 
-def reconcile_rows(
-    valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int
-) -> None:
+def reconcile_rows(valid_df: pd.DataFrame, fold: Fold, n_train: int, n_test: int) -> None:
     """Accounts for every filtered row: train + purged + test + outside."""
     n_total = len(valid_df)
-    n_purged = int(
-        ((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum()
-    )
+    n_purged = int(((valid_df.index > fold.train_end) & (valid_df.index < fold.test_start)).sum())
     n_outside = int((valid_df.index > fold.test_end).sum())
     assert n_train + n_purged + n_test + n_outside == n_total, (
         f"Fold {fold.fold_id}: row reconciliation failed "
@@ -209,9 +265,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 
     for ticker in chosen:
         sub = (
-            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]]
-            .dropna(subset=["Close"])
-            .copy()
+            master_df[master_df["Ticker"] == ticker][["Close", "High", "Low", "Volume"]].dropna(subset=["Close"]).copy()
         )
         cut_pos = int(rng.integers(40, len(sub)))
         cutoff = sub.index[cut_pos]
@@ -231,6 +285,7 @@ def feature_causality_check(master_df: pd.DataFrame, n_tickers: int = 3, seed: i
 # =============================================================================
 # METRICS
 # =============================================================================
+
 
 def daily_cross_sectional_metrics(
     day_df: pd.DataFrame,
@@ -252,6 +307,7 @@ def daily_cross_sectional_metrics(
         "bottom5_pos_rate": np.nan,
         "excess_bottom5": np.nan,
         "top_decile_lift": np.nan,
+        "daily_auc": rank_auc(day_df["Target"], day_df["p_hat"]),
     }
 
     ranked = day_df.sort_values(["p_hat", "Ticker"], ascending=[False, True])
@@ -271,6 +327,17 @@ def daily_cross_sectional_metrics(
         row["top_decile_lift"] = float(ranked.head(k)["Target"].mean()) / base_rate
 
     return row
+
+
+def mean_per_day_auc(scored: pd.DataFrame) -> float:
+    """Average of the within-day rank AUCs of p_hat against Target (date index)."""
+    return float(np.nanmean([rank_auc(g["Target"], g["p_hat"]) for _, g in scored.groupby(level=0)]))
+
+
+def score_baseline(test_df: pd.DataFrame, feature: str) -> pd.DataFrame:
+    """A model-free ranking: p_hat is the raw feature value. Shares the metric
+    code with the real model so the comparison is like for like."""
+    return test_df[["Ticker", "Target"]].assign(p_hat=test_df[feature].to_numpy(dtype=float))
 
 
 def reliability_bins(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
@@ -327,9 +394,12 @@ def daily_aggregates(daily: pd.DataFrame, seed: int = 42) -> dict:
     excess = daily["excess_top15"].dropna()
     b5_excess = daily["excess_bottom5"].dropna()
     lift = daily["top_decile_lift"].dropna()
+    auc = daily["daily_auc"].dropna()
 
     return {
         "n_days": int(len(daily)),
+        "daily_auc_mean": float(auc.mean()),
+        "daily_auc_ci95": block_bootstrap_ci(auc.to_numpy(), seed=seed),
         "base_rate_daily_mean": float(daily["base_rate"].mean()),
         "precision_top15_mean": float(p15.mean()),
         "precision_top15_median": float(p15.median()),
@@ -348,10 +418,14 @@ def daily_aggregates(daily: pd.DataFrame, seed: int = 42) -> dict:
     }
 
 
-def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
-    """Scores one fold's test set: per-day metrics, fold summary, calibration."""
-    from sklearn.metrics import roc_auc_score
+def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
+    """Scores one fold's test set.
 
+    Returns (daily metrics, fold summary, calibration bins, scored), where
+    scored holds Ticker, Target and p_hat for every test row (date index) so
+    the caller can pool predictions and run the backtest without predicting
+    a second time.
+    """
     test_df = test_df.copy()
     test_df["p_hat"] = model.predict_proba(test_df[FEATURE_COLUMNS])[:, 1]
 
@@ -367,7 +441,7 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
     p = test_df["p_hat"].to_numpy()
     summary = {
         "fold_id": fold.fold_id,
-        "roc_auc": float(roc_auc_score(y, p)),
+        "roc_auc": _roc_auc(y, p),
         "brier": float(np.mean((p - y) ** 2)),
         "base_rate": float(y.mean()),
         "n_test_rows": int(len(y)),
@@ -376,12 +450,134 @@ def evaluate_fold(model, test_df: pd.DataFrame, fold: Fold) -> tuple[pd.DataFram
 
     calib = reliability_bins(y, p)
     calib.insert(0, "fold_id", str(fold.fold_id))
-    return daily, summary, calib
+    return daily, summary, calib, test_df[["Ticker", "Target", "p_hat"]]
+
+
+# =============================================================================
+# PORTFOLIO BACKTEST
+# =============================================================================
+
+
+def run_backtest(
+    scored: pd.DataFrame,
+    returns_wide: pd.DataFrame,
+    spy_returns: pd.Series,
+    top_n: int = TOP_N_CANDIDATES,
+    hold_days: int = BACKTEST_HOLD_DAYS,
+    cost_bps: float = BACKTEST_COST_BPS,
+) -> pd.DataFrame:
+    """
+    Daily returns of a long-only book built from the walk-forward predictions.
+
+    At each test day's close the top_n stocks by p_hat form a tranche that is
+    held for the next hold_days sessions, equal-weighted (rebalanced daily
+    within the tranche, a small approximation to buy-and-hold). The book is
+    the equal-weighted average of the active tranches, so 1/hold_days of it
+    rolls every day. Each tranche pays cost_bps on its first day (entry) and
+    on its last day (exit). Positions whose return is missing on a day
+    (ticker left the panel) are dropped from that tranche's mean.
+
+    Benchmarks: the equal-weighted average return of the previous day's whole
+    eligible cross-section (what the ranking is chosen from, cost-free), and
+    SPY. Returns a frame with one row per session after the first pick.
+    """
+    dates = returns_wide.index
+    values = returns_wide.to_numpy(dtype=float)
+    col_of = {t: i for i, t in enumerate(returns_wide.columns)}
+    cost = cost_bps / 1e4
+
+    ranked = scored.sort_values(["p_hat", "Ticker"], ascending=[False, True])
+    picks = ranked.groupby(level=0).head(top_n).groupby(level=0)["Ticker"].apply(list).to_dict()
+    eligible = scored.groupby(level=0)["Ticker"].apply(list).to_dict()
+
+    def mean_return(day_idx: int, tickers: list[str]) -> float:
+        cols = [col_of[t] for t in tickers if t in col_of]
+        r = values[day_idx, cols]
+        r = r[~np.isnan(r)]
+        return float(r.mean()) if len(r) else float("nan")
+
+    pick_dates = sorted(picks)
+    first_idx = int(dates.searchsorted(pick_dates[0])) + 1
+    last_idx = min(int(dates.searchsorted(pick_dates[-1])) + hold_days, len(dates) - 1)
+    rows = []
+    for t_idx in range(first_idx, last_idx + 1):
+        t = dates[t_idx]
+        tranche_ret, tranche_cost = [], []
+        for k in range(1, hold_days + 1):
+            s_idx = t_idx - k
+            if s_idx < 0 or dates[s_idx] not in picks:
+                continue
+            r = mean_return(t_idx, picks[dates[s_idx]])
+            if np.isnan(r):
+                continue
+            tranche_ret.append(r)
+            tranche_cost.append((cost if k == 1 else 0.0) + (cost if k == hold_days else 0.0))
+        if not tranche_ret:
+            continue
+        prev = dates[t_idx - 1]
+        rows.append(
+            {
+                "date": t,
+                "strategy_gross": float(np.mean(tranche_ret)),
+                "strategy_net": float(np.mean(tranche_ret) - np.mean(tranche_cost)),
+                "universe_ew": mean_return(t_idx, eligible[prev]) if prev in eligible else float("nan"),
+                "spy": float(spy_returns.get(t, np.nan)),
+                "n_tranches": len(tranche_ret),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def performance_summary(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> dict:
+    """Annualised return/vol, Sharpe (rf = 0), max drawdown and total return of a daily series."""
+    r = returns.dropna()
+    if len(r) < 2:
+        return {k: float("nan") for k in ("total_return", "ann_return", "ann_vol", "sharpe", "max_drawdown", "n_days")}
+    equity = (1.0 + r).cumprod()
+    total = float(equity.iloc[-1] - 1.0)
+    # A daily loss of 100% or more wipes the book out; the geometric mean is then -100%.
+    ann_return = float(equity.iloc[-1] ** (periods_per_year / len(r)) - 1.0) if equity.iloc[-1] > 0 else -1.0
+    ann_vol = float(r.std(ddof=1) * math.sqrt(periods_per_year))
+    sharpe = float(r.mean() / r.std(ddof=1) * math.sqrt(periods_per_year)) if r.std(ddof=1) > 0 else float("nan")
+    drawdown = float((equity / equity.cummax() - 1.0).min())
+    return {
+        "total_return": total,
+        "ann_return": ann_return,
+        "ann_vol": ann_vol,
+        "sharpe": sharpe,
+        "max_drawdown": drawdown,
+        "n_days": int(len(r)),
+    }
+
+
+def backtest_results(bt: pd.DataFrame) -> dict:
+    """JSON block: assumptions, per-series summaries and calendar-year returns."""
+    series = ["strategy_net", "strategy_gross", "universe_ew", "spy"]
+    by_year = []
+    for year, g in bt.groupby(bt["date"].dt.year):
+        row = {"year": int(year), "n_days": int(len(g))}
+        for col in series:
+            row[col] = float((1.0 + g[col].dropna()).prod() - 1.0)
+        by_year.append(row)
+    return {
+        "assumptions": {
+            "side": "long_only",
+            "top_n": TOP_N_CANDIDATES,
+            "hold_days": BACKTEST_HOLD_DAYS,
+            "weighting": "equal, overlapping tranches (1/hold_days rolls per day)",
+            "cost_bps_per_side": BACKTEST_COST_BPS,
+            "execution": "close-to-close; no barrier exits, slippage or capacity model",
+            "benchmark_universe_ew": "equal-weighted previous-day eligible cross-section, no costs",
+        },
+        "series": {col: performance_summary(bt[col]) for col in series},
+        "by_year": by_year,
+    }
 
 
 # =============================================================================
 # EVALUATION DRIVER
 # =============================================================================
+
 
 def run_evaluation(
     master_df: pd.DataFrame,
@@ -391,14 +587,12 @@ def run_evaluation(
     purge_ablation: bool = False,
     causality_check: bool = True,
     seed: int = 42,
-) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Runs the full walk-forward evaluation on a labelled master panel.
-    Returns (results, daily_df, calibration_df); results holds the fold
-    table plus per-fold, pooled and overall-daily metrics.
+    Returns (results, daily_df, calibration_df, backtest_df); results holds
+    the fold table plus per-fold, pooled, overall-daily and backtest metrics.
     """
-    from sklearn.metrics import roc_auc_score
-
     cal = master_df.index.unique().sort_values()
     if causality_check:
         feature_causality_check(master_df, seed=seed)
@@ -412,6 +606,7 @@ def run_evaluation(
     all_calib: list[pd.DataFrame] = []
     pooled_y: list[np.ndarray] = []
     pooled_p: list[np.ndarray] = []
+    all_scored: list[pd.DataFrame] = []
 
     for fold in folds:
         t0 = time.perf_counter()
@@ -422,11 +617,9 @@ def run_evaluation(
 
         # Train-vs-test generalisation gap (console evidence only): a
         # near-zero gap would suggest test rows contaminated the pool.
-        train_auc = float(
-            roc_auc_score(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
-        )
+        train_auc = _roc_auc(train["Target"], model.predict_proba(train[FEATURE_COLUMNS])[:, 1])
 
-        daily, summary, calib = evaluate_fold(model, test, fold)
+        daily, summary, calib, scored = evaluate_fold(model, test, fold)
 
         fold_table.append(
             {
@@ -440,6 +633,7 @@ def run_evaluation(
                 "n_test_rows": int(len(test)),
                 "n_test_days": int(daily.shape[0]),
                 "n_tickers_in_test": int(test["Ticker"].nunique()),
+                "n_estimators": int(model.get_params()["n_estimators"]),
                 "partial": fold.partial,
             }
         )
@@ -447,8 +641,8 @@ def run_evaluation(
         all_daily.append(daily)
         all_calib.append(calib)
         pooled_y.append(test["Target"].to_numpy())
-        # Recompute predictions once, reuse for pooling
-        pooled_p.append(model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        pooled_p.append(scored["p_hat"].to_numpy())
+        all_scored.append(scored)
 
         elapsed = time.perf_counter() - t0
         print(
@@ -456,6 +650,7 @@ def run_evaluation(
             f"{', partial' if fold.partial else ''}): "
             f"train {len(train):,} rows to {train.index.max().date()}, "
             f"test {len(test):,} rows, "
+            f"{model.get_params()['n_estimators']} trees, "
             f"AUC {summary['roc_auc']:.4f} (train {train_auc:.4f}), "
             f"P@15 {summary['precision_top15_mean']:.3f} "
             f"vs base {summary['base_rate_daily_mean']:.3f} "
@@ -471,9 +666,43 @@ def run_evaluation(
     overall_daily = daily_aggregates(daily_all, seed=seed)
     # Lean CSV schema; excess_bottom5 is derivable as base_rate - bottom5_pos_rate
     daily_df = daily_all[
-        ["date", "fold_id", "n_candidates", "base_rate", "precision_top15",
-         "excess_top15", "bottom5_pos_rate", "top_decile_lift"]
+        [
+            "date",
+            "fold_id",
+            "n_candidates",
+            "base_rate",
+            "precision_top15",
+            "excess_top15",
+            "bottom5_pos_rate",
+            "top_decile_lift",
+            "daily_auc",
+        ]
     ]
+
+    # Portfolio backtest from the same out-of-sample predictions. Daily
+    # returns come from the unfiltered panel so that a stock that leaves the
+    # index mid-hold still has its return on the days it is held.
+    scored_all = pd.concat(all_scored)
+    returns_wide = master_df.pivot_table(index=master_df.index, columns="Ticker", values="Return")
+    spy_returns = master_df["SPY_Return"].groupby(level=0).first()
+    backtest_df = run_backtest(scored_all, returns_wide, spy_returns)
+
+    # Volatility-only baseline: rank each day by ATR_Ratio, no model. Volatile
+    # stocks hit either barrier more often, so this is the bar the classifier
+    # has to clear, and its backtest is the fair comparison for the book.
+    test_rows = valid_df.loc[scored_all.index.unique()]
+    atr_scored = score_baseline(test_rows, "ATR_Ratio")
+    atr_daily = pd.DataFrame(
+        [daily_cross_sectional_metrics(day_df) | {"date": date} for date, day_df in atr_scored.groupby(level=0)]
+    )
+    atr_backtest = run_backtest(atr_scored, returns_wide, spy_returns)
+    baselines = {
+        "atr_rank": {
+            "description": "Each test day ranked by ATR_Ratio (14-day ATR / close) alone; no model.",
+            **{k: v for k, v in daily_aggregates(atr_daily, seed=seed).items() if k in BASELINE_KEYS},
+            "backtest": {col: performance_summary(atr_backtest[col]) for col in ("strategy_net", "strategy_gross")},
+        }
+    }
 
     y_pooled = np.concatenate(pooled_y)
     p_pooled = np.concatenate(pooled_p)
@@ -485,33 +714,61 @@ def run_evaluation(
         "folds": fold_table,
         "per_fold": per_fold,
         "pooled": {
-            "roc_auc": float(roc_auc_score(y_pooled, p_pooled)),
+            "roc_auc": _roc_auc(y_pooled, p_pooled),
             "brier": float(np.mean((p_pooled - y_pooled) ** 2)),
             "base_rate": float(y_pooled.mean()),
             "n_rows": int(len(y_pooled)),
             "note": "Each test row is scored by its own fold's model (standard walk-forward pooling).",
         },
         "overall_daily": overall_daily,
+        "backtest": backtest_results(backtest_df),
+        "baselines": baselines,
     }
-    return results, daily_df, calib_df
+    return results, daily_df, calib_df, backtest_df
 
 
-def _shuffled_target_test(train: pd.DataFrame, test: pd.DataFrame, seed: int = 42) -> None:
+def _shuffled_target_test(
+    train: pd.DataFrame, test: pd.DataFrame, seed: int = 42, n_permutations: int = 5
+) -> list[float]:
     """
-    Leakage canary: refit fold 1 with permuted training labels. If the test
-    AUC lands away from 0.5, information reaches the test set through
-    something other than the labels.
-    """
-    from sklearn.metrics import roc_auc_score
+    Leakage canary: refit fold 1 with fully permuted training labels and
+    score the real test labels. Judged on the mean per-day (within-day) AUC
+    averaged over permutations, which has a clean null at 0.5: on this data
+    five permutations gave 0.490 to 0.504. Information reaching the test set
+    through anything other than the labels would push it above 0.5.
 
-    print("Running shuffled-target leakage check (refits fold 1)...")
-    rng = np.random.default_rng(seed)
-    shuffled = train.copy()
-    shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
-    model = train_model(shuffled)
-    auc = float(roc_auc_score(test["Target"], model.predict_proba(test[FEATURE_COLUMNS])[:, 1]))
-    verdict = "OK" if 0.48 <= auc <= 0.52 else "WARNING: investigate before publishing"
-    print(f"  Shuffled-target test AUC = {auc:.4f} (expected ~0.5): {verdict}")
+    Two tempting alternatives are not nulls and are deliberately not used:
+    - Pooled AUC of a permuted model wobbles between about 0.46 and 0.53
+      because macro features are shared by every ticker on a day, so its
+      effective sample is the number of test days, not rows.
+    - Permuting labels *within* each date preserves daily base rates, and a
+      model fit to that still reaches per-day AUC ~0.55: it learns that
+      high-volatility days have high hit rates, ranks volatile stocks first,
+      and volatile stocks genuinely do hit barriers more often within a day.
+      That is the volatility confound measured by the ATR baseline, not a leak.
+    """
+    print(f"Running shuffled-target leakage check ({n_permutations} full permutations, refits fold 1)...")
+    daily_aucs = []
+    for i in range(n_permutations):
+        rng = np.random.default_rng(seed + i)
+        shuffled = train.copy()
+        shuffled["Target"] = rng.permutation(shuffled["Target"].to_numpy())
+        model = train_model(shuffled)
+        p = model.predict_proba(test[FEATURE_COLUMNS])[:, 1]
+        pooled = _roc_auc(test["Target"], p)
+        per_day = mean_per_day_auc(test[["Ticker", "Target"]].assign(p_hat=p))
+        daily_aucs.append(per_day)
+        print(
+            f"  permutation {i + 1}: {model.get_params()['n_estimators']} trees, "
+            f"pooled AUC {pooled:.4f}, mean per-day AUC {per_day:.4f}"
+        )
+    mean_auc = float(np.mean(daily_aucs))
+    verdict = "OK" if mean_auc <= 0.52 and max(daily_aucs) <= 0.55 else "WARNING: investigate before publishing"
+    print(
+        f"  Per-day AUC under permutation: mean {mean_auc:.4f}, range {min(daily_aucs):.4f} to "
+        f"{max(daily_aucs):.4f} (expected 0.5): {verdict}"
+    )
+    return daily_aucs
 
 
 def _purge_ablation_test(
@@ -526,8 +783,6 @@ def _purge_ablation_test(
     purge and compare AUC on the first 10 test days. Console evidence only,
     never written to the committed artefacts.
     """
-    from sklearn.metrics import roc_auc_score
-
     print("Running purge-ablation check (refits fold 1 without the purge)...")
     pos = int(cal.searchsorted(fold.test_start))
     unpurged_train = valid_df[valid_df.index <= cal[pos - 1]]
@@ -536,8 +791,8 @@ def _purge_ablation_test(
     first_days = test.index.unique().sort_values()[:10]
     early = test[test.index.isin(first_days)]
     y = early["Target"].to_numpy()
-    auc_unpurged = float(roc_auc_score(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
-    auc_purged = float(roc_auc_score(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1]))
+    auc_unpurged = _roc_auc(y, unpurged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
+    auc_purged = _roc_auc(y, purged_model.predict_proba(early[FEATURE_COLUMNS])[:, 1])
     print(
         f"  First 10 test days: purged AUC {auc_purged:.4f}, "
         f"unpurged AUC {auc_unpurged:.4f} "
@@ -548,6 +803,7 @@ def _purge_ablation_test(
 # =============================================================================
 # ARTEFACT WRITING
 # =============================================================================
+
 
 def _json_safe(obj):
     """Rounds floats and converts NaN to null so the JSON is strict and stable."""
@@ -564,7 +820,9 @@ def _git_commit() -> str:
     try:
         out = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
             check=True,
         )
         return out.stdout.strip()
@@ -591,6 +849,7 @@ def write_artefacts(
     results: dict,
     daily_df: pd.DataFrame,
     calib_df: pd.DataFrame,
+    backtest_df: pd.DataFrame,
     metadata: dict,
     cache_used: bool,
     first_test_year: int,
@@ -607,6 +866,7 @@ def write_artefacts(
             "last_price_date": metadata.get("last_price_date"),
             "n_tickers": len(metadata.get("tickers", [])),
             "ticker_source": "Wikipedia S&P 500 constituents as of the download date",
+            "universe": metadata.get("universe", {"type": "unknown"}),
             "cache_used": cache_used,
             "versions": _library_versions(),
         },
@@ -623,6 +883,14 @@ def write_artefacts(
         "model": {
             "type": "XGBClassifier",
             "params": XGB_PARAMS,
+            "n_estimators_note": (
+                "params.n_estimators is a ceiling. Per fold, the tree count is "
+                "chosen by early stopping on the most recent "
+                f"{EARLY_STOPPING_VALIDATION_FRACTION:.0%} of training dates "
+                f"(purged by {FORWARD_WINDOW_DAYS} days, patience "
+                f"{EARLY_STOPPING_ROUNDS} rounds), then the model is refit on "
+                "all training rows; see validation_scheme.folds[*].n_estimators."
+            ),
             "feature_columns": FEATURE_COLUMNS,
         },
         "validation_scheme": {
@@ -639,11 +907,13 @@ def write_artefacts(
             ),
             "folds": results["folds"],
         },
-        "caveats": CAVEATS,
+        "caveats": caveats(metadata),
         "results": {
             "pooled": results["pooled"],
             "per_fold": results["per_fold"],
             "overall_daily": results["overall_daily"],
+            "backtest": results["backtest"],
+            "baselines": results["baselines"],
         },
     }
 
@@ -663,36 +933,47 @@ def write_artefacts(
         calib_out[col] = calib_out[col].round(6)
     calib_out.to_csv(CALIBRATION_PATH, index=False)
 
-    print(f"\nArtefacts written:\n  {METRICS_PATH}\n  {DAILY_PATH}\n  {CALIBRATION_PATH}")
+    bt_out = backtest_df.copy()
+    bt_out["date"] = pd.to_datetime(bt_out["date"]).dt.strftime("%Y-%m-%d")
+    for col in ("strategy_gross", "strategy_net", "universe_ew", "spy"):
+        bt_out[col] = bt_out[col].round(8)
+    bt_out.to_csv(BACKTEST_PATH, index=False)
+
+    print(f"\nArtefacts written:\n  {METRICS_PATH}\n  {DAILY_PATH}\n  {CALIBRATION_PATH}\n  {BACKTEST_PATH}")
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Walk-forward validation of the screener's XGBoost classifier."
-    )
+    parser = argparse.ArgumentParser(description="Walk-forward validation of the screener's XGBoost classifier.")
     parser.add_argument(
-        "--first-test-year", type=int, default=2020,
+        "--first-test-year",
+        type=int,
+        default=2020,
         help="first calendar year used as a test block (default 2020)",
     )
     parser.add_argument(
-        "--skip-partial", action="store_true",
+        "--skip-partial",
+        action="store_true",
         help="exclude the final, incomplete calendar year from the folds",
     )
     parser.add_argument(
-        "--cache", metavar="PATH", default=None,
-        help="pickle the labelled master panel here and reuse it on later runs "
-             "(e.g. master_cache.pkl; gitignored)",
+        "--cache",
+        metavar="PATH",
+        default=None,
+        help="pickle the labelled master panel here and reuse it on later runs (e.g. master_cache.pkl; gitignored)",
     )
     parser.add_argument(
-        "--shuffled-target-check", action="store_true",
+        "--shuffled-target-check",
+        action="store_true",
         help="leakage canary: refit fold 1 on permuted labels, expect test AUC ~0.5",
     )
     parser.add_argument(
-        "--purge-ablation", action="store_true",
+        "--purge-ablation",
+        action="store_true",
         help="refit fold 1 without the purge and report the boundary-leakage AUC gap",
     )
     return parser.parse_args(argv)
@@ -713,7 +994,7 @@ def main() -> None:
             pd.to_pickle((master_df, metadata), args.cache)
             print(f"Master panel cached to {args.cache}.")
 
-    results, daily_df, calib_df = run_evaluation(
+    results, daily_df, calib_df, backtest_df = run_evaluation(
         master_df,
         first_test_year=args.first_test_year,
         include_partial_final=not args.skip_partial,
@@ -721,7 +1002,7 @@ def main() -> None:
         purge_ablation=args.purge_ablation,
     )
 
-    write_artefacts(results, daily_df, calib_df, metadata, cache_used, args.first_test_year)
+    write_artefacts(results, daily_df, calib_df, backtest_df, metadata, cache_used, args.first_test_year)
 
     pooled = results["pooled"]
     overall = results["overall_daily"]
@@ -734,6 +1015,18 @@ def main() -> None:
         f"Daily precision@{TOP_N_CANDIDATES}: mean {overall['precision_top15_mean']:.3f} "
         f"vs daily base rate {overall['base_rate_daily_mean']:.3f}; "
         f"beats base on {overall['frac_days_top15_beats_base']:.1%} of days"
+    )
+    bt = results["backtest"]["series"]
+    atr = results["baselines"]["atr_rank"]
+    print(
+        f"ATR-rank baseline (no model): per-day AUC {atr['daily_auc_mean']:.4f}, "
+        f"P@15 {atr['precision_top15_mean']:.3f}, backtest net {atr['backtest']['strategy_net']['ann_return']:+.1%}/yr"
+    )
+    print(
+        f"Mean per-day AUC {overall['daily_auc_mean']:.4f}; backtest (net of {BACKTEST_COST_BPS:.0f} bps/side): "
+        f"{bt['strategy_net']['ann_return']:+.1%}/yr, Sharpe {bt['strategy_net']['sharpe']:.2f}, "
+        f"max DD {bt['strategy_net']['max_drawdown']:.1%} vs universe EW {bt['universe_ew']['ann_return']:+.1%}/yr, "
+        f"SPY {bt['spy']['ann_return']:+.1%}/yr"
     )
     print(f"Total runtime: {(time.perf_counter() - t0) / 60:.1f} min")
 

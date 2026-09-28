@@ -1,19 +1,18 @@
 """
 pit_screener.py - what survivorship bias does to the SCREENER's headline numbers.
 
-The root README reports precision@top-15 of 48.1% against a 29.4% base rate,
-and states that historical constituent lists "are not freely available, so this
-is documented rather than corrected". Both the premise and the consequence can
-now be checked: we have CRSP's exact daily S&P 500 membership, and prices for
-the delisted members too.
+The root README's universe is point-in-time by symbol, rebuilt from Wikipedia's
+change history, but Yahoo serves no prices for about half of the removed
+companies, so they are missing. CRSP has exact daily S&P 500 membership and
+prices for every member, delisted or not, so the full bias can be measured.
 
 The experiment isolates the bias and nothing else. Both arms use the same CRSP
 prices, the same feature and label code imported from screener.py, the same
 walk-forward evaluation from evaluate.py, and the same date range. Only the
 universe differs:
 
-  current-members : today's index membership applied to every past date, which
-                    is what the published run did (Wikipedia, scraped live)
+  current-members : today's index membership applied to every past date, the
+                    universe the README reported before it went point-in-time
   point-in-time   : the index as it actually stood on each date, including
                     members that were later removed or delisted
 
@@ -121,8 +120,8 @@ def main():
         print(f"\n=== {name}: {len(frame):,} rows, "
               f"{frame['Ticker'].nunique()} names, "
               f"{frame.groupby(level=0).size().median():.0f}/day ===", flush=True)
-        res, daily, _ = run_evaluation(frame, first_test_year=a.first_test_year,
-                                       causality_check=False)
+        res, daily, _, _ = run_evaluation(frame, first_test_year=a.first_test_year,
+                                          causality_check=False)
         d = res["overall_daily"]
         out[name] = {
             "rows": int(len(frame)), "names": int(frame["Ticker"].nunique()),
@@ -133,6 +132,8 @@ def main():
             "excess_ci95": d["excess_precision_top15_ci95"],
             "frac_days_beats_base": d["frac_days_top15_beats_base"],
             "top_decile_lift": d.get("top_decile_lift_mean"),
+            "daily_auc": d["daily_auc_mean"],
+            "daily_auc_ci95": d["daily_auc_ci95"],
             "n_days": int(len(daily)),
         }
 
@@ -145,6 +146,7 @@ def main():
     print("=" * 72)
     print(f"{'metric':<28}{'current-members':>18}{'point-in-time':>16}{'change':>10}")
     for label, key, fmt in (("ROC AUC (pooled)", "auc_pooled", "{:.3f}"),
+                            ("Per-day AUC", "daily_auc", "{:.3f}"),
                             ("Precision@15", "precision_top15", "{:.1%}"),
                             ("Base rate", "base_rate", "{:.1%}"),
                             ("Excess over base", "excess", "{:+.1%}"),

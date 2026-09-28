@@ -17,7 +17,7 @@ from screener import (
 
 W = FORWARD_WINDOW_DAYS
 N = 20
-TP_PRICE = 100.0 * (1 + TAKE_PROFIT_PCT)   # exact barrier value for close=100
+TP_PRICE = 100.0 * (1 + TAKE_PROFIT_PCT)  # exact barrier value for close=100
 SL_PRICE = 100.0 * (1 - STOP_LOSS_PCT)
 
 
@@ -36,7 +36,7 @@ def test_upper_barrier_first_labels_one(make_ohlcv):
 
 def test_lower_barrier_first_labels_zero(make_ohlcv):
     df = flat(make_ohlcv)
-    df.iloc[1, df.columns.get_loc("Low")] = SL_PRICE - 0.1   # stop hit at bar 1
+    df.iloc[1, df.columns.get_loc("Low")] = SL_PRICE - 0.1  # stop hit at bar 1
     df.iloc[3, df.columns.get_loc("High")] = TP_PRICE + 0.1  # take-profit later
     out = apply_triple_barrier_labels(df)
     assert out["Target"].iloc[0] == 0.0
@@ -65,7 +65,7 @@ def test_entry_bar_itself_is_excluded(make_ohlcv):
     spike = 6
     df.iloc[spike, df.columns.get_loc("High")] = TP_PRICE + 0.1
     out = apply_triple_barrier_labels(df)
-    assert out["Target"].iloc[spike] == 0.0     # own bar excluded
+    assert out["Target"].iloc[spike] == 0.0  # own bar excluded
     assert out["Target"].iloc[spike - 1] == 1.0  # previous entry sees it
 
 
@@ -75,8 +75,8 @@ def test_window_boundaries(make_ohlcv):
     hit = 6
     df.iloc[hit, df.columns.get_loc("High")] = TP_PRICE + 0.1
     out = apply_triple_barrier_labels(df)
-    assert out["Target"].iloc[hit - W] == 1.0       # hit exactly at i+W
-    assert out["Target"].iloc[hit - W - 1] == 0.0   # hit at i+W+1: outside
+    assert out["Target"].iloc[hit - W] == 1.0  # hit exactly at i+W
+    assert out["Target"].iloc[hit - W - 1] == 0.0  # hit at i+W+1: outside
 
 
 def test_touch_counts_as_crossing(make_ohlcv):
@@ -90,7 +90,7 @@ def test_touch_counts_as_crossing(make_ohlcv):
 def test_tail_rows_are_nan_and_length_preserved(make_ohlcv):
     out = apply_triple_barrier_labels(flat(make_ohlcv))
     assert len(out) == N
-    assert out["Target"].iloc[N - W:].isna().all()
+    assert out["Target"].iloc[N - W :].isna().all()
     assert out["Target"].iloc[: N - W].notna().all()
 
 

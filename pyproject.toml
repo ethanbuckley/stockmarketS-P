@@ -7,3 +7,5 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The modules under test live at the repo root, not in a package.
+pythonpath = ["."]
