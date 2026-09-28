@@ -8,3 +8,7 @@ xgboost>=2.0
 transformers>=4.40
 torch>=2.2
 scikit-learn>=1.4    # evaluate.py: ROC AUC
+
+# WRDS/Compustat access (alpha/wrds_source.py).
+# NOT the official `wrds` package: it pins pandas<2.3 and breaks master_cache.pkl.
+psycopg2-binary>=2.9

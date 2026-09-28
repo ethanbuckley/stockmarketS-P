@@ -72,6 +72,9 @@ The dashboard's risk tab simulates thousands of future paths for an equal-weight
 
 ## Validation
 
+> [!NOTE]
+> A companion module, [`alpha/`](alpha/README.md), tests whether these predictions are *tradeable* rather than merely accurate. It is worth reading before quoting anything below: its conclusion is that they are not, and it measures what survivorship bias and configuration search are each worth to the numbers in this section.
+
 The classifier is evaluated with **expanding-window walk-forward validation** (`evaluate.py`): 7 folds with calendar-year test blocks from 2020 to a partial 2026, each retraining the production model from scratch on all data up to that fold, including the early-stopping choice of tree count, which uses only that fold's training data. Because the label looks 5 trading days ahead, the last 5 trading days before each test block are purged from training; features are strictly backward-looking, which an automated causality check enforces. Two leakage canaries back this up. Training fold 1 on fully permuted labels gives a mean per-day AUC of 0.498 (range 0.486 to 0.508 over five permutations) against 0.592 with the real labels. Removing the purge gives the unpurged model no advantage on the first ten test days (0.588 against 0.592), so the boundary leakage the purge exists to remove is not detectable here.
 
 Headline out-of-sample results (2026-09-11 data snapshot; 503 current members plus 124 of 242 former members; 794,700 test rows over 1,659 test days; all figures computed by `evaluate.py` and stored in [`data/validation_metrics.json`](data/validation_metrics.json)):
@@ -140,8 +143,8 @@ Signal definitions used by the screener and dashboard:
 
 Read these before quoting any number above; the validation caveats among them also ship inside `data/validation_metrics.json`, so the dashboard cannot display the metrics without them.
 
-- **Survivorship bias.** Membership is point-in-time by symbol: current members from their join date, and companies removed since 2015 up to their removal date where Yahoo still has prices (124 of 242 removed tickers). The remaining removed companies, mostly acquired or delisted, are absent, and that residual still inflates measured hit rates. Symbol-based matching also means a company whose ticker changed while in the index is covered under its current symbol only.
-- **The backtest is stylised.** Close-to-close 5-day holds at 10 bps per side, equal weights, no barrier exits, no slippage or capacity model. It shows whether the ranking's edge survives a plausible cost, not what a fund would earn.
+- **Survivorship bias.** Membership is point-in-time by symbol: current members from their join date, and companies removed since 2015 up to their removal date where Yahoo still has prices (124 of 242 removed tickers). The remaining removed companies, mostly acquired or delisted, are absent, and that residual still inflates measured hit rates. Symbol-based matching also means a company whose ticker changed while in the index is covered under its current symbol only. CRSP, which has exact daily membership and prices for delisted members, measures the full bias with this repository's own feature, label and evaluation code on 2020 to 2024 test years. Applying today's members to every date gives precision@15 of 47.0% and an excess of +18.2 points (95% CI +16.5 to +19.9); the index as it actually stood gives 45.1% and +16.4 points (+14.8 to +18.0). Per-day AUC moves from 0.644 to 0.640. The bias is under 2 points of precision@15 and the confidence intervals overlap. The universe above already corrects part of it. See [`alpha/pit_screener.py`](alpha/pit_screener.py).
+- **The backtest is stylised.** Close-to-close 5-day holds at 10 bps per side, equal weights, no barrier exits, no slippage or capacity model. It shows whether the ranking's edge survives a plausible cost, not what a fund would earn. The [`alpha/`](alpha/README.md) module tests tradeability properly, with a cost model, survivorship-free CRSP data and a correction for the number of configurations searched. Its answer is negative: no configuration survives (deflated Sharpe 0.736 against a 0.95 bar).
 - **Data quality.** Prices are a single yfinance snapshot with auto-adjustment applied at download time; adjusted history can differ from what was observable in real time, and delisted tickers are absent. Prices are forward-filled across a ticker's non-trading days so macro series align; volume is not, so those days carry no training row.
 - **Label conventions.** "Neither barrier hit" and "both barriers hit on the same bar" both map to label 0, so the class balance depends on the volatility regime (daily base rates ranged from 23.5% to 36.1% across test years). A low predicted probability is therefore not a symmetric short signal.
 - **Overlapping labels.** Consecutive test days share 5-day label windows and are not independent; the confidence interval above uses a moving-block bootstrap with block length 5.
@@ -184,6 +187,7 @@ stockmarketS-P/
 │   ├── validation_daily.csv        # One row per out-of-sample test day
 │   ├── validation_calibration.csv  # Reliability-curve bins
 │   └── backtest_daily.csv          # Daily returns of the long-only book and benchmarks
+├── alpha/                  # Research module: is the ranking tradeable? (see alpha/README.md)
 ├── tests/                  # Network-free tests (labels, features, sentiment, folds, backtest, app)
 ├── .github/workflows/
 │   ├── ci.yml                  # Lint, format check and tests on every push

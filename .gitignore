@@ -9,5 +9,19 @@ venv/
 # Local dataset cache written by evaluate.py --cache; never commit
 master_cache.pkl
 
-# Unrelated project checked out alongside this one
-alpha/
+# Local OHLC download written by alpha/overnight.py; never commit
+alpha/ohlc_open.parquet
+alpha/download.log
+alpha/cache13f/
+alpha/cache13f_holdings/
+alpha/13f_ingest.log
+alpha/13f_holdings.log
+alpha/shares.log
+alpha/*.log
+alpha/shares_outstanding.parquet
+alpha/sp500_membership.parquet
+alpha/cache13f_wide/
+alpha/ohlc_wide.parquet
+alpha/cusip_map_wide.csv
+alpha/ohlc_compustat.parquet
+alpha/sp500_membership_compustat.parquet
