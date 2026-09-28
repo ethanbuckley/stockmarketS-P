@@ -203,16 +203,13 @@ The alpha rises into small caps and the cost of reaching it rises faster. This a
 Caveat on the estimator: Corwin–Schultz measures continuous-session effective spread and is known to overstate it for very liquid names. Closing and opening auctions often execute at or inside the spread, so the large-cap numbers should not be read as a death sentence for the S&P 500 book. For the small-cap buckets the gap (17.0 against 7.46) is wide enough to survive that caveat.
 
 
-## Compustat via WRDS (staged, awaiting account approval)
+## CRSP and Compustat via WRDS
 
-`wrds_source.py` replaces the yfinance/Wikipedia data layer with Compustat, which retains delisted companies and carries an **open** price — the two things that block a proper fix. `comp.idxcst_his` supplies index membership with real from/thru dates, replacing the Wikipedia revision scrape.
+`wrds_source.py` replaces the yfinance/Wikipedia data layer with WRDS data, which retains delisted companies and carries an **open** price — the two things that block a proper fix. It prefers CRSP (`crsp.dsf` with `crsp.dsedelist` delisting returns, `crsp.dsp500list` membership) and falls back to Compustat (`comp.secd`, `comp.idxcst_his`) where CRSP is not entitled. UCL turned out to license CRSP, so every WRDS result in this module is on CRSP; see [the pre-registered result](#the-pre-registered-result-2026-09-11).
 
-Nothing here has touched live data yet: the account is pending approval. What *is* verified:
+The transformation is tested offline. Eight tests in `tests/test_wrds_source.py` exercise the Compustat→panel logic against synthetic `comp.secd`-shaped rows: the decomposition identity is exact, a 2-for-1 split gives a *zero* overnight return rather than −50%, a pure dividend lands entirely in the overnight leg (LPS p.196 n.9), the intraday leg is adjustment-invariant, calendar gaps produce no overnight return, and the output schema is a drop-in for `ohlc_open.parquet`.
 
-- **Connection parameters.** With a username set and no `~/.pgpass`, the connection resolves `wrds-pgdata.wharton.upenn.edu`, reaches port 9737, and fails at the auth handshake. Host, port, database and TLS are therefore correct; only credentials are missing.
-- **The transformation.** Eight tests in `tests/test_wrds_source.py` exercise the Compustat→panel logic against synthetic `comp.secd`-shaped rows: the decomposition identity is exact, a 2-for-1 split gives a *zero* overnight return rather than −50%, a pure dividend lands entirely in the overnight leg (LPS p.196 n.9), the intraday leg is adjustment-invariant, calendar gaps produce no overnight return, and the output schema is a drop-in for `ohlc_open.parquet`.
-
-When approval lands:
+The pulled files (`ohlc_compustat.parquet`, `sp500_membership_compustat.parquet`) are git-ignored. WRDS terms do not allow redistributing the data, so only portfolio-level results are committed. To reproduce with your own WRDS account:
 
 ```bash
 export WRDS_USERNAME=yourusername
@@ -303,8 +300,7 @@ Test C failing is the durable conclusion of the whole module: with clean data, r
 
 These inherit the root README's limitations and add two.
 
-- **Survivorship bias — now measured, not just corrected.** The pre-registered CRSP test puts the delisted half at −0.104 bps/side with a CI spanning zero. What follows describes the pre-CRSP state.
-- **Survivorship bias — partly corrected (pre-CRSP).** `constituents.py` gives genuine point-in-time membership, which removes pre-inclusion history and costs ~25% of measured performance. The other half is not fixable with free data: Yahoo serves no history for delisted tickers, so 276 of 784 true members (36%) are simply absent, and they are disproportionately losers. Fully fixing this needs CRSP (via WRDS, which UCL may provide) or a paid survivorship-bias-free feed such as Sharadar SEP.
+- **Survivorship bias — corrected on CRSP, not on yfinance.** `constituents.py` gives genuine point-in-time membership, which removes pre-inclusion history and costs ~25% of measured performance. The delisted half cannot be fixed with free data: Yahoo serves no history for delisted tickers, so 276 of 784 true members (36%) are absent from every yfinance-based result above. The pre-registered CRSP test measures what they are worth: −0.104 bps/side, with a CI spanning zero. CRSP coverage ends 2024-12-31.
 - **The small-cap extension is more survivorship-biased, not less.** It is drawn from currently-listed SEC tickers, and small-cap delisting rates are several times large-cap ones.
 - **Raw open prices.** LPS use a first-half-hour VWAP specifically because the raw open can be set by very small orders. We use the raw open and test the resulting artefact directly rather than avoiding it.
 - **Cost model is a constant per unit traded.** No market impact, no spread that widens with size, no borrow cost on the short leg.
