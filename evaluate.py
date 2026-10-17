@@ -750,10 +750,13 @@ def _shuffled_target_test(
       because macro features are shared by every ticker on a day, so its
       effective sample is the number of test days, not rows.
     - Permuting labels *within* each date preserves daily base rates, and a
-      model fit to that still reaches per-day AUC ~0.55: it learns that
-      high-volatility days have high hit rates, ranks volatile stocks first,
-      and volatile stocks genuinely do hit barriers more often within a day.
-      That is the volatility confound measured by the ATR baseline, not a leak.
+      model fit to that still reaches mean per-day AUC 0.557 (pooled 0.587)
+      on fold 1: it learns that high-volatility days have high hit rates,
+      ranks volatile stocks first (within-day rank correlation with
+      ATR_Ratio 0.46), and volatile stocks genuinely do hit barriers more
+      often within a day. That is the volatility confound measured by the
+      ATR baseline, not a leak. See within_date_permutation_test; the
+      figures are stored in results.leakage_checks.within_date_permutation.
     """
     print(f"Running shuffled-target leakage check ({n_permutations} full permutations, refits fold 1)...")
     daily_aucs = []
