@@ -25,6 +25,8 @@ Usage:
     python evaluate.py [--first-test-year 2020] [--skip-partial]
                        [--cache master_cache.pkl]
                        [--shuffled-target-check] [--purge-ablation]
+                       [--within-date-permutation-check]
+    python evaluate.py --record-within-date-permutation [--cache ...]
 
 Author: Ethan Buckley
 """
@@ -585,6 +587,7 @@ def run_evaluation(
     include_partial_final: bool = True,
     shuffled_target_check: bool = False,
     purge_ablation: bool = False,
+    within_date_permutation_check: bool = False,
     causality_check: bool = True,
     seed: int = 42,
 ) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -607,6 +610,7 @@ def run_evaluation(
     pooled_y: list[np.ndarray] = []
     pooled_p: list[np.ndarray] = []
     all_scored: list[pd.DataFrame] = []
+    leakage_checks: dict = {}
 
     for fold in folds:
         t0 = time.perf_counter()
@@ -661,6 +665,8 @@ def run_evaluation(
             _shuffled_target_test(train, test, seed=seed)
         if fold.fold_id == 1 and purge_ablation:
             _purge_ablation_test(valid_df, cal, fold, test, model)
+        if fold.fold_id == 1 and within_date_permutation_check:
+            leakage_checks["within_date_permutation"] = within_date_permutation_test(train, test, model, seed=seed)
 
     daily_all = pd.concat(all_daily, ignore_index=True)
     overall_daily = daily_aggregates(daily_all, seed=seed)
@@ -724,6 +730,8 @@ def run_evaluation(
         "backtest": backtest_results(backtest_df),
         "baselines": baselines,
     }
+    if leakage_checks:
+        results["leakage_checks"] = leakage_checks
     return results, daily_df, calib_df, backtest_df
 
 
@@ -742,10 +750,13 @@ def _shuffled_target_test(
       because macro features are shared by every ticker on a day, so its
       effective sample is the number of test days, not rows.
     - Permuting labels *within* each date preserves daily base rates, and a
-      model fit to that still reaches per-day AUC ~0.55: it learns that
-      high-volatility days have high hit rates, ranks volatile stocks first,
-      and volatile stocks genuinely do hit barriers more often within a day.
-      That is the volatility confound measured by the ATR baseline, not a leak.
+      model fit to that still reaches mean per-day AUC 0.557 (pooled 0.587)
+      on fold 1: it learns that high-volatility days have high hit rates,
+      ranks volatile stocks first (within-day rank correlation with
+      ATR_Ratio 0.46), and volatile stocks genuinely do hit barriers more
+      often within a day. That is the volatility confound measured by the
+      ATR baseline, not a leak. See within_date_permutation_test; the
+      figures are stored in results.leakage_checks.within_date_permutation.
     """
     print(f"Running shuffled-target leakage check ({n_permutations} full permutations, refits fold 1)...")
     daily_aucs = []
@@ -769,6 +780,102 @@ def _shuffled_target_test(
         f"{max(daily_aucs):.4f} (expected 0.5): {verdict}"
     )
     return daily_aucs
+
+
+def _mean_within_day_rank_corr(scored: pd.DataFrame, a: str, b: str) -> float:
+    """Average over days of the Spearman correlation between columns a and b."""
+    ranks = scored[[a, b]].groupby(level=0).rank()
+    # Days where either column is constant have no correlation and are skipped
+    corrs = [g[a].corr(g[b]) for _, g in ranks.groupby(level=0) if g[a].nunique() > 1 and g[b].nunique() > 1]
+    return float(np.mean(corrs))
+
+
+def _permute_within_dates(target: pd.Series, rng: np.random.Generator) -> np.ndarray:
+    """Shuffles target values among rows sharing a date (the index)."""
+    dates = target.index.to_numpy()
+    by_date = np.argsort(dates, kind="stable")
+    shuffled_by_date = np.lexsort((rng.random(len(target)), dates))
+    out = np.empty(len(target), dtype=target.dtype)
+    out[by_date] = target.to_numpy()[shuffled_by_date]
+    return out
+
+
+def within_date_permutation_test(
+    train: pd.DataFrame, test: pd.DataFrame, real_model, seed: int = 42, n_permutations: int = 5
+) -> dict:
+    """
+    Regime-versus-ranking check: refit fold 1 with training labels permuted
+    *within* each date. Every day keeps its hit rate, but a stock's features
+    no longer tell the model anything about its own label that day. Scores
+    the real test labels and records pooled AUC, mean per-day AUC and the
+    within-day rank correlation of the scores with ATR_Ratio, next to the
+    real-label model and the ATR-only ranking on the same fold.
+    """
+    print(f"Running within-date permutation check ({n_permutations} permutations, refits fold 1)...")
+    runs = []
+    for i in range(n_permutations):
+        rng = np.random.default_rng(seed + i)
+        shuffled = train.copy()
+        shuffled["Target"] = _permute_within_dates(shuffled["Target"], rng)
+        assert (shuffled["Target"].groupby(level=0).mean() == train["Target"].groupby(level=0).mean()).all()
+        model = train_model(shuffled)
+        scored = test[["Target", "ATR_Ratio"]].assign(p_hat=model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+        run = {
+            "seed": seed + i,
+            "n_estimators": int(model.get_params()["n_estimators"]),
+            "pooled_auc": _roc_auc(scored["Target"], scored["p_hat"]),
+            "daily_auc_mean": mean_per_day_auc(scored),
+            "rank_corr_with_atr_mean": _mean_within_day_rank_corr(scored, "p_hat", "ATR_Ratio"),
+        }
+        runs.append(run)
+        print(
+            f"  permutation {i + 1}: {run['n_estimators']} trees, pooled AUC {run['pooled_auc']:.4f}, "
+            f"mean per-day AUC {run['daily_auc_mean']:.4f}, "
+            f"within-day rank corr with ATR {run['rank_corr_with_atr_mean']:.3f}"
+        )
+
+    real = test[["Target", "ATR_Ratio"]].assign(p_hat=real_model.predict_proba(test[FEATURE_COLUMNS])[:, 1])
+    atr = score_baseline(test, "ATR_Ratio")
+
+    def _summary(key: str) -> dict:
+        values = [r[key] for r in runs]
+        return {"mean": float(np.mean(values)), "min": float(min(values)), "max": float(max(values))}
+
+    block = {
+        "description": (
+            "Fold 1 refit on training labels permuted within each date (daily hit rates kept, "
+            "stock-level label information destroyed), scored against the real test labels."
+        ),
+        "fold_id": 1,
+        "n_train_rows": int(len(train)),
+        "n_test_rows": int(len(test)),
+        "n_test_days": int(test.index.nunique()),
+        "n_permutations": n_permutations,
+        "pooled_auc": _summary("pooled_auc"),
+        "daily_auc_mean": _summary("daily_auc_mean"),
+        "rank_corr_with_atr_mean": _summary("rank_corr_with_atr_mean"),
+        "per_permutation": runs,
+        "reference_same_fold": {
+            "real_labels": {
+                "pooled_auc": _roc_auc(real["Target"], real["p_hat"]),
+                "daily_auc_mean": mean_per_day_auc(real),
+                "rank_corr_with_atr_mean": _mean_within_day_rank_corr(real, "p_hat", "ATR_Ratio"),
+            },
+            "atr_rank": {
+                "pooled_auc": _roc_auc(atr["Target"], atr["p_hat"]),
+                "daily_auc_mean": mean_per_day_auc(atr),
+            },
+        },
+    }
+    print(
+        f"  Mean over permutations: pooled AUC {block['pooled_auc']['mean']:.4f}, "
+        f"per-day AUC {block['daily_auc_mean']['mean']:.4f}; real labels: pooled "
+        f"{block['reference_same_fold']['real_labels']['pooled_auc']:.4f}, per-day "
+        f"{block['reference_same_fold']['real_labels']['daily_auc_mean']:.4f}; ATR rank: pooled "
+        f"{block['reference_same_fold']['atr_rank']['pooled_auc']:.4f}, per-day "
+        f"{block['reference_same_fold']['atr_rank']['daily_auc_mean']:.4f}"
+    )
+    return block
 
 
 def _purge_ablation_test(
@@ -845,6 +952,19 @@ def _library_versions() -> dict:
     }
 
 
+def _data_snapshot(metadata: dict, cache_used: bool) -> dict:
+    return {
+        "download_timestamp_utc": metadata.get("download_timestamp_utc"),
+        "data_start": DATA_START_DATE,
+        "last_price_date": metadata.get("last_price_date"),
+        "n_tickers": len(metadata.get("tickers", [])),
+        "ticker_source": "Wikipedia S&P 500 constituents as of the download date",
+        "universe": metadata.get("universe", {"type": "unknown"}),
+        "cache_used": cache_used,
+        "versions": _library_versions(),
+    }
+
+
 def write_artefacts(
     results: dict,
     daily_df: pd.DataFrame,
@@ -860,16 +980,7 @@ def write_artefacts(
         "schema_version": SCHEMA_VERSION,
         "generated_at_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "git_commit": _git_commit(),
-        "data_snapshot": {
-            "download_timestamp_utc": metadata.get("download_timestamp_utc"),
-            "data_start": DATA_START_DATE,
-            "last_price_date": metadata.get("last_price_date"),
-            "n_tickers": len(metadata.get("tickers", [])),
-            "ticker_source": "Wikipedia S&P 500 constituents as of the download date",
-            "universe": metadata.get("universe", {"type": "unknown"}),
-            "cache_used": cache_used,
-            "versions": _library_versions(),
-        },
+        "data_snapshot": _data_snapshot(metadata, cache_used),
         "label_definition": {
             "type": "triple_barrier",
             "forward_window_days": FORWARD_WINDOW_DAYS,
@@ -914,6 +1025,7 @@ def write_artefacts(
             "overall_daily": results["overall_daily"],
             "backtest": results["backtest"],
             "baselines": results["baselines"],
+            **({"leakage_checks": results["leakage_checks"]} if "leakage_checks" in results else {}),
         },
     }
 
@@ -940,6 +1052,40 @@ def write_artefacts(
     bt_out.to_csv(BACKTEST_PATH, index=False)
 
     print(f"\nArtefacts written:\n  {METRICS_PATH}\n  {DAILY_PATH}\n  {CALIBRATION_PATH}\n  {BACKTEST_PATH}")
+
+
+def record_within_date_permutation(
+    master_df: pd.DataFrame, metadata: dict, cache_used: bool, first_test_year: int = 2020, seed: int = 42
+) -> None:
+    """
+    Runs only fold 1's within-date permutation check and stores it under
+    results.leakage_checks in the existing metrics artefact, leaving every
+    other number untouched. The block carries its own data snapshot and
+    commit because it need not come from the same run as the headline.
+    """
+    cal = master_df.index.unique().sort_values()
+    valid_df = master_df.dropna(subset=FEATURE_COLUMNS + ["Target"])
+    fold = make_folds(cal, first_test_year)[0]
+    train, test = split_fold(valid_df, cal, fold)
+    print(f"Fold 1: train {len(train):,} rows to {train.index.max().date()}, test {len(test):,} rows")
+    block = within_date_permutation_test(train, test, train_model(train), seed=seed)
+    block["provenance"] = {
+        "generated_at_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git_commit": _git_commit(),
+        "data_snapshot": _data_snapshot(metadata, cache_used),
+        "note": (
+            "Recorded separately from the headline run with --record-within-date-permutation; "
+            "reference_same_fold gives the real-label model and ATR ranking on this snapshot."
+        ),
+    }
+
+    with open(METRICS_PATH) as f:
+        payload = json.load(f)
+    payload["results"].setdefault("leakage_checks", {})["within_date_permutation"] = block
+    with open(METRICS_PATH, "w") as f:
+        json.dump(_json_safe(payload), f, indent=2)
+        f.write("\n")
+    print(f"\nRecorded results.leakage_checks.within_date_permutation in {METRICS_PATH}")
 
 
 # =============================================================================
@@ -976,6 +1122,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="refit fold 1 without the purge and report the boundary-leakage AUC gap",
     )
+    parser.add_argument(
+        "--within-date-permutation-check",
+        action="store_true",
+        help="refit fold 1 on labels permuted within each date and record pooled and per-day AUC",
+    )
+    parser.add_argument(
+        "--record-within-date-permutation",
+        action="store_true",
+        help="run only the within-date permutation check and add it to the existing metrics artefact",
+    )
     return parser.parse_args(argv)
 
 
@@ -994,12 +1150,17 @@ def main() -> None:
             pd.to_pickle((master_df, metadata), args.cache)
             print(f"Master panel cached to {args.cache}.")
 
+    if args.record_within_date_permutation:
+        record_within_date_permutation(master_df, metadata, cache_used, first_test_year=args.first_test_year)
+        return
+
     results, daily_df, calib_df, backtest_df = run_evaluation(
         master_df,
         first_test_year=args.first_test_year,
         include_partial_final=not args.skip_partial,
         shuffled_target_check=args.shuffled_target_check,
         purge_ablation=args.purge_ablation,
+        within_date_permutation_check=args.within_date_permutation_check,
     )
 
     write_artefacts(results, daily_df, calib_df, backtest_df, metadata, cache_used, args.first_test_year)
