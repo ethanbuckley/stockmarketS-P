@@ -220,3 +220,25 @@ def test_performance_summary_constant_return():
     assert s["ann_return"] == pytest.approx(1.001**252 - 1)
     assert s["max_drawdown"] == 0.0
     assert s["n_days"] == 252
+
+
+def test_permute_within_dates_keeps_each_days_labels():
+    dates = pd.to_datetime(["2020-01-03", "2020-01-02", "2020-01-03", "2020-01-02", "2020-01-03", "2020-01-02"])
+    target = pd.Series([1, 0, 0, 1, 1, 0], index=dates)
+    shuffled = pd.Series(evaluate._permute_within_dates(target, np.random.default_rng(0)), index=dates)
+    for day in dates.unique():
+        assert sorted(shuffled.loc[day]) == sorted(target.loc[day])
+
+
+def test_within_date_permutation_check_recorded():
+    pytest.importorskip("xgboost")
+    pytest.importorskip("sklearn")
+
+    results, *_ = evaluate.run_evaluation(
+        synthetic_master(), first_test_year=2020, causality_check=False, within_date_permutation_check=True
+    )
+    block = results["leakage_checks"]["within_date_permutation"]
+    assert len(block["per_permutation"]) == block["n_permutations"]
+    # The synthetic signal is stock-level, so permuting within dates must destroy it
+    assert block["daily_auc_mean"]["mean"] < results["per_fold"][0]["daily_auc_mean"]
+    assert block["n_test_rows"] == results["folds"][0]["n_test_rows"]
